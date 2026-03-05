@@ -1,5 +1,12 @@
 {
   "models": {
+    "qwen3-32b-local": {
+      "model_name": "Qwen/Qwen3-32B",
+      "model_type": "openai",
+      "base_url": "http://localhost:8000/v1",
+      "api_key_env": "VLLM_API_KEY",
+      "temperature": 0.0
+    },
     "qwen-plus": {
       "model_name": "qwen-plus",
       "model_type": "openai",

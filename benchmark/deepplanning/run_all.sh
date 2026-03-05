@@ -22,7 +22,7 @@ DOMAINS="travel shopping"
 # Model configuration (applies to all domains unless overridden)
 # For a single model: BENCHMARK_MODEL="qwen-plus"
 # For multiple models: BENCHMARK_MODEL="qwen-plus qwen3-max gpt-4o-2024-11-20"
-BENCHMARK_MODEL="qwen-plus"
+BENCHMARK_MODEL="qwen3-32b-local"
 
 # ============================================
 # Shopping Domain Configuration

@@ -46,6 +46,7 @@ test.db
 
 benchmark/deepplanning/travelplanning/database/database_en/
 benchmark/deepplanning/travelplanning/database/database_zh/
+benchmark/deepplanning/.env
 benchmark/deepplanning/travelplanning/.env
 __pycache__/
 benchmark/deepplanning/travelplanning/CUSTOM_AGENT.md
