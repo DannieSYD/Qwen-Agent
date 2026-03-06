@@ -173,17 +173,20 @@ class ToolsFnAgent:
 
         try:
             import tools  # noqa: F401
-        except Exception:
+        except Exception as e:
+            print(f"⚠️  Failed to import tools package: {e}")
             return instances
-        
+
         try:
             import importlib
             tools_mod = importlib.import_module('tools.base_travel_tool')
             base_tool_cls = getattr(tools_mod, 'BaseTravelTool', None)
-        except Exception:
+        except Exception as e:
+            print(f"⚠️  Failed to import BaseTravelTool: {e}")
             return instances
-        
+
         if base_tool_cls is None:
+            print("⚠️  BaseTravelTool class not found in tools.base_travel_tool")
             return instances
 
         for cls in base_tool_cls.__subclasses__():
@@ -193,9 +196,13 @@ class ToolsFnAgent:
                 inst_name = getattr(inst, 'name', None) or getattr(cls, 'name', None)
                 if inst_name:
                     instances[inst_name] = inst
-            except Exception:
+            except Exception as e:
+                print(f"⚠️  Failed to instantiate tool {cls.__name__}: {e}")
                 continue
-        
+
+        if not instances:
+            print(f"⚠️  No tool instances loaded! Subclasses found: {[c.__name__ for c in base_tool_cls.__subclasses__()]}")
+
         return instances
 
     def _exec_tool(self, name: str, arguments_json: str) -> str:

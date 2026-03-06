@@ -48,6 +48,17 @@ benchmark/deepplanning/travelplanning/database/database_en/
 benchmark/deepplanning/travelplanning/database/database_zh/
 benchmark/deepplanning/.env
 benchmark/deepplanning/travelplanning/.env
+benchmark/deepplanning/aggregated_results/*
+benchmark/deepplanning/travelplanning/results/*
+benchmark/deepplanning/travelplanning/database/*
+benchmark/deepplanning/shoppingplanning/database_level*
+benchmark/deepplanning/shoppingplanning/database_zip/
+benchmark/deepplanning/shoppingplanning/result_report/
+benchmark/deepplanning/shoppingplanning/database_run_*
+benchmark/deepplanning/shoppingplanning/database_infered/
+benchmark/deepplanning/shoppingplanning/._database_level*
+
+
 __pycache__/
 benchmark/deepplanning/travelplanning/CUSTOM_AGENT.md
 benchmark/deepplanning/travelplanning/MODEL_CONFIG.md
@@ -65,3 +76,5 @@ qwen-agent-docs/website/.source-docs/
 qwen-agent-docs/website/last-sync.json
 qwen-agent-docs/website/_pagefind/
 qwen-agent-docs/website/*.tsbuildinfo
+
+.claude/

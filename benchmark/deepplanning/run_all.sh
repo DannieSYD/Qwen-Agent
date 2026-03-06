@@ -17,12 +17,13 @@ cd "$BASE_DIR"
 # ============================================
 
 # Domains to run (space-separated): "shopping travel" or just "shopping"
-DOMAINS="travel shopping"
+DOMAINS="travel"
 
 # Model configuration (applies to all domains unless overridden)
 # For a single model: BENCHMARK_MODEL="qwen-plus"
 # For multiple models: BENCHMARK_MODEL="qwen-plus qwen3-max gpt-4o-2024-11-20"
-BENCHMARK_MODEL="qwen3-32b-local"
+# BENCHMARK_MODEL="qwen3-32b-local"
+BENCHMARK_MODEL="gpt-5.4"
 
 # ============================================
 # Shopping Domain Configuration
@@ -48,7 +49,7 @@ SHOPPING_MODEL="${BENCHMARK_MODEL}"
 TRAVEL_MODEL="${BENCHMARK_MODEL}"
 
 # Language for travel domain: zh, en, or empty for both
-TRAVEL_LANGUAGE=""
+TRAVEL_LANGUAGE="en"
 
 # Number of parallel workers for travel
 TRAVEL_WORKERS=50

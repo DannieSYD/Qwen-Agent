@@ -138,11 +138,17 @@ def process_single_report(
             ]
             
             # Call LLM for conversion
-            resp = client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                max_tokens=10240
-            )
+            # Use max_completion_tokens for newer OpenAI models (gpt-5.x, o-series),
+            # fall back to max_tokens for older/compatible models
+            completion_params = {
+                "model": model_name,
+                "messages": messages,
+            }
+            if any(x in model_name.lower() for x in ['gpt-5', 'o1', 'o3', 'o4']):
+                completion_params["max_completion_tokens"] = 10240
+            else:
+                completion_params["max_tokens"] = 10240
+            resp = client.chat.completions.create(**completion_params)
             
             content = resp.choices[0].message.content or ""
             
@@ -234,7 +240,8 @@ def convert_reports(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Always use qwen-plus for conversion
-    conversion_model = 'qwen-plus'
+    conversion_model = 'gpt-5.4'
+    # conversion_model = 'qwen-plus'
     
     # Load model config and create client
     model_config = load_model_config(conversion_model)
