@@ -78,3 +78,6 @@ qwen-agent-docs/website/_pagefind/
 qwen-agent-docs/website/*.tsbuildinfo
 
 .claude/
+*.html
+
+benchmark/deepplanning/reference_visualization/
