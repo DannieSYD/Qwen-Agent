@@ -253,10 +253,10 @@ class ShoppingFnAgent:
         })
         return history_messages
 
-    def run(self, user_query: str, system_prompt: str | None = None, max_llm_calls: int = 100, save_messages: bool = True, messages_output_dir: str | None = None, sample_id: str | None = None) -> List[Any]:
+    def run(self, user_query: str, system_prompt: str | None = None, max_llm_calls: int = 100, save_messages: bool = True, messages_output_dir: str | None = None, sample_id: str | None = None) -> tuple[List[Any], dict]:
         """
         Agent main loop: Call LLM → Execute tools → Repeat until final answer
-        
+
         Args:
             user_query: User query
             system_prompt: System prompt
@@ -264,9 +264,9 @@ class ShoppingFnAgent:
             save_messages: Whether to save messages to file
             messages_output_dir: Output directory for messages (if sample_id not provided)
             sample_id: Sample ID for database path resolution
-            
+
         Returns:
-            Complete message history
+            (messages, token_usage): Complete message history and token usage dict
         """
         if save_messages:
             # If sample_id exists, save to {database_base_path}/case_{sample_id}/messages.json
@@ -286,20 +286,32 @@ class ShoppingFnAgent:
         if save_messages:
             self._save_messages(messages, messages_file, 0, "Initial messages")
 
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_tokens = 0
+
         for step_count in range(1, max_llm_calls + 1):
             resp = self._call_llm(messages=messages, tools=self.openai_tools)
+
+            # Accumulate token usage
+            usage = getattr(resp, 'usage', None)
+            if usage:
+                total_prompt_tokens += getattr(usage, 'prompt_tokens', 0) or 0
+                total_completion_tokens += getattr(usage, 'completion_tokens', 0) or 0
+                total_tokens += getattr(usage, 'total_tokens', 0) or 0
+
             msg = resp.choices[0].message
-            
+
             # Convert message object to serializable dict
             msg_dict = {
                 "role": "assistant",
                 "content": msg.content or '',
             }
-            
+
             # Preserve reasoning_content if present
             if hasattr(msg, 'reasoning_content') and msg.reasoning_content:
                 msg_dict['reasoning_content'] = msg.reasoning_content
-            
+
             calls = self._detect_tool_calls(msg)
             if calls:
                 msg_dict["tool_calls"] = [
@@ -313,11 +325,11 @@ class ShoppingFnAgent:
                     }
                     for call in calls
                 ]
-            
+
             messages.append(msg_dict)
             if save_messages:
                 self._save_messages(messages, messages_file, step_count, f"LLM response - {len(calls)} tool calls")
-            
+
             if not calls:
                 break
 
@@ -330,18 +342,26 @@ class ShoppingFnAgent:
         messages = self._add_to_cart(messages)
         for step_count in range(1, max_llm_calls + 1):
             resp = self._call_llm(messages=messages, tools=self.openai_tools)
+
+            # Accumulate token usage
+            usage = getattr(resp, 'usage', None)
+            if usage:
+                total_prompt_tokens += getattr(usage, 'prompt_tokens', 0) or 0
+                total_completion_tokens += getattr(usage, 'completion_tokens', 0) or 0
+                total_tokens += getattr(usage, 'total_tokens', 0) or 0
+
             msg = resp.choices[0].message
-            
+
             # Convert message object to serializable dict
             msg_dict = {
                 "role": "assistant",
                 "content": msg.content or '',
             }
-            
+
             # Preserve reasoning_content if present
             if hasattr(msg, 'reasoning_content') and msg.reasoning_content:
                 msg_dict['reasoning_content'] = msg.reasoning_content
-            
+
             calls = self._detect_tool_calls(msg)
             if calls:
                 msg_dict["tool_calls"] = [
@@ -355,21 +375,23 @@ class ShoppingFnAgent:
                     }
                     for call in calls
                 ]
-            
+
             messages.append(msg_dict)
             if save_messages:
                 self._save_messages(messages, messages_file, step_count, f"LLM response - {len(calls)} tool calls")
-            
+
             if not calls:
-                return messages
-            
+                token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
+                return messages, token_usage
+
             for call in calls:
                 tool_result = self._exec_tool(call['name'], call['arguments'])
                 messages.append({"role": "tool", "tool_call_id": call['id'], "content": tool_result})
             if save_messages:
                 self._save_messages(messages, messages_file, step_count, f"Tool execution completed - {len(calls)} tools")
 
-        return messages
+        token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
+        return messages, token_usage
     
     def _save_messages(self, messages: List[Any], filepath: Path, step: int, description: str):
         """Save messages to file"""
@@ -457,16 +479,16 @@ def run_agent_inference(
             
             start_time = time.time()
             
-            messages = agent.run(
+            messages, token_usage = agent.run(
                 user_query=query,
                 system_prompt=system_prompt,
                 save_messages=True,
                 sample_id=str(sample_id),
                 max_llm_calls=max_llm_calls
             )
-            
+
             elapsed = time.time() - start_time
-            
+
             result = {
                 'id': sample_id,
                 'query': query,
@@ -474,6 +496,7 @@ def run_agent_inference(
                 'messages': messages,
                 'elapsed_time': elapsed,
                 'success': True,
+                'token_usage': token_usage,
             }
             
             with print_lock:

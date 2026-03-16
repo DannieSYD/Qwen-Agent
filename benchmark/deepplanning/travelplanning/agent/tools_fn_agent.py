@@ -336,30 +336,41 @@ class ToolsFnAgent:
     def run(self,
             user_query: str,
             system_prompt: Optional[str] = None,
-            max_llm_calls: int = 100) -> Tuple[str, List[Dict[str, Any]]]:
+            max_llm_calls: int = 100) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """
         Agent main loop: Call LLM → Execute tools → Repeat until final answer
-        
+
         Args:
             user_query: User query
             system_prompt: System prompt
             max_llm_calls: Maximum LLM calls
-            
+
         Returns:
-            (final_plan, messages): Final plan and complete message history
+            (final_plan, messages, token_usage): Final plan, complete message history, and token usage
         """
         messages: List[Dict[str, Any]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": user_query})
-        
+
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_tokens = 0
+
         llm_budget = max_llm_calls
-        
+
         while llm_budget > 0:
             llm_budget -= 1
-            
+
             resp = self._call_llm(messages=messages, tools=self.openai_tools)
-            
+
+            # Accumulate token usage
+            usage = getattr(resp, 'usage', None)
+            if usage:
+                total_prompt_tokens += getattr(usage, 'prompt_tokens', 0) or 0
+                total_completion_tokens += getattr(usage, 'completion_tokens', 0) or 0
+                total_tokens += getattr(usage, 'total_tokens', 0) or 0
+
             msg = resp.choices[0].message
             calls = self._detect_tool_calls(msg)
             messages.append(msg)
@@ -374,13 +385,14 @@ class ToolsFnAgent:
                         "content": tool_result,
                     })
                 continue
-            
+
             # No tool calls → Return final answer
-            # msg was already added to messages at line 343
             final_content = self._extract_plan_content(msg.content or '')
-            return final_content, messages
-        
-        return "Reached max LLM calls without final answer.", messages
+            token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
+            return final_content, messages, token_usage
+
+        token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
+        return "Reached max LLM calls without final answer.", messages, token_usage
 
 
 def run_agent_inference(
@@ -471,17 +483,17 @@ def run_agent_inference(
             system_prompt = get_system_prompt(language)
             start_time = time.time()
             
-            final_plan, full_messages = agent.run(
+            final_plan, full_messages, token_usage = agent.run(
                 user_query=query,
                 system_prompt=system_prompt,
                 max_llm_calls=max_llm_calls
             )
-            
+
             elapsed = time.time() - start_time
-            
+
             # Ensure messages are serializable before writing
             serialized_messages = agent._serialize_messages(full_messages)
-            
+
             result = {
                 'id': sample_id,
                 'query': query,
@@ -491,6 +503,7 @@ def run_agent_inference(
                 'messages': serialized_messages,  # Use serialized messages
                 'elapsed_time': elapsed,
                 'success': True,
+                'token_usage': token_usage,
             }
             
             trajectory_file = output_dir / 'trajectories' / f'{sample_id}.json'

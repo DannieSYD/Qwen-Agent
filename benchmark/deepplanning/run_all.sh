@@ -17,13 +17,14 @@ cd "$BASE_DIR"
 # ============================================
 
 # Domains to run (space-separated): "shopping travel" or just "shopping"
-DOMAINS="shopping travel"
+DOMAINS="travel"
 
 # Model configuration (applies to all domains unless overridden)
 # For a single model: BENCHMARK_MODEL="qwen-plus"
 # For multiple models: BENCHMARK_MODEL="qwen-plus qwen3-max gpt-4o-2024-11-20"
 # BENCHMARK_MODEL="qwen3-32b-local"
-BENCHMARK_MODEL="qwen3-30b-a3b-thinking-2507"
+# BENCHMARK_MODEL="qwen3-30b-a3b-thinking-2507"
+BENCHMARK_MODEL="gpt-5.2-2025-12-11"
 
 # ============================================
 # Shopping Domain Configuration
