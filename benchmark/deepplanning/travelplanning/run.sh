@@ -10,7 +10,7 @@ MODEL="${BENCHMARK_MODEL:-${TRAVEL_AGENT_MODEL:-qwen-plus}}"
 # Language: zh, en, or empty for both
 # Can be overridden by BENCHMARK_LANGUAGE environment variable
 # Use - instead of :- to allow empty string (empty means both languages)
-LANGUAGE="${BENCHMARK_LANGUAGE-zh}"
+LANGUAGE="${BENCHMARK_LANGUAGE-en}"
 
 # Parallel workers
 # Can be overridden by BENCHMARK_WORKERS environment variable
@@ -35,6 +35,10 @@ VERBOSE="${BENCHMARK_VERBOSE:-false}"
 # Debug mode
 # Can be overridden by BENCHMARK_DEBUG environment variable
 DEBUG="${BENCHMARK_DEBUG:-false}"
+
+# Prompt variant: default, explore
+# Can be overridden by BENCHMARK_PROMPT_VARIANT environment variable
+PROMPT_VARIANT="${BENCHMARK_PROMPT_VARIANT:-default}"
 
 
                
@@ -308,11 +312,12 @@ for i in "${!MODELS_TO_RUN[@]}"; do
     echo "   📝 Log: $LOG_FILE"
     
     (
-        python run.py \
+        PYTHONUNBUFFERED=1 python run.py \
             --model "$MODEL_NAME" \
             --workers $WORKERS \
             --max-llm-calls $MAX_LLM_CALLS \
             --start-from "$MODEL_START" \
+            --prompt-variant "$PROMPT_VARIANT" \
             ${LANGUAGE:+--language "$LANGUAGE"} \
             ${OUTPUT_DIR:+--output-dir "$OUTPUT_DIR"} \
             ${VERBOSE:+--verbose} \

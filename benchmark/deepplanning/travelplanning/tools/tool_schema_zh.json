@@ -151,23 +151,28 @@
     "type": "function",
     "function": {
         "name": "query_road_route_info",
-        "description": "计算并返回两个地点间的公路路线详情，包括距离（米）、预计耗时（分钟）和估算费用（元）。该功能会基于总距离自动选择交通方式：2公里及以内为步行(花费0元)，超过2公里则按驾车（出租车）模式计算,估算费用为一辆车的费用，默认可以坐4人。",
+        "description": "计算并返回两个地点间的公路路线详情，包括距离（米）、预计耗时（分钟）和估算费用（元）。该功能会基于总距离自动选择交通方式：2公里及以内为步行(花费0元)，超过2公里则按驾车（出租车）模式计算,估算费用为一辆车的费用，默认可以坐4人。推荐：使用 origin_place/destination_place 传入地点名称（如之前工具查询到的景点名或酒店名），工具会自动解析精确坐标。",
         "parameters": {
             "type": "object",
             "properties": {
                 "origin": {
                     "type": "string",
-                    "description": "出发地经纬度坐标（格式：纬度,经度），精度保留6位小数"
+                    "description": "出发地经纬度坐标（格式：纬度,经度），精度保留6位小数。如果提供了 origin_place 则不需要此参数。"
                 },
                 "destination": {
                     "type": "string",
-                    "description": "目的地经纬度坐标（格式：纬度,经度），精度保留6位小数"
+                    "description": "目的地经纬度坐标（格式：纬度,经度），精度保留6位小数。如果提供了 destination_place 则不需要此参数。"
+                },
+                "origin_place": {
+                    "type": "string",
+                    "description": "出发地名称（如之前工具查询到的景点名、酒店名或车站名），工具会自动解析精确坐标。优先于 origin 坐标参数。"
+                },
+                "destination_place": {
+                    "type": "string",
+                    "description": "目的地名称（如之前工具查询到的景点名、酒店名或车站名），工具会自动解析精确坐标。优先于 destination 坐标参数。"
                 }
             },
-            "required": [
-                "origin",
-                "destination"
-            ]
+            "required": []
         }
     }
 },
@@ -175,23 +180,24 @@
     "type": "function",
     "function": {
         "name": "recommend_restaurants",
-        "description": "根据指定的经纬度坐标，推荐附近的餐厅信息。返回的列表包含餐厅名称、经纬度坐标、人均价格、评分、营业时间等详细信息。",
+        "description": "推荐指定地点附近的餐厅信息。推荐：使用 'near' 参数传入地点名称（如之前工具查询到的景点名），工具会自动解析精确坐标。也可以直接提供经纬度坐标。返回的列表包含餐厅名称、经纬度坐标、人均价格、评分、营业时间等详细信息。",
         "parameters": {
             "type": "object",
             "properties": {
+                "near": {
+                    "type": "string",
+                    "description": "要查询附近餐厅的地点名称（如之前工具查询到的景点名、酒店名），工具会自动解析精确坐标。优先于经纬度参数。"
+                },
                 "latitude": {
                     "type": "string",
-                    "description": "纬度坐标,精度保留6位小数"
+                    "description": "纬度坐标,精度保留6位小数。如果提供了 'near' 则不需要此参数。"
                 },
                 "longitude": {
                     "type": "string",
-                    "description": "经度坐标,精度保留6位小数"
+                    "description": "经度坐标,精度保留6位小数。如果提供了 'near' 则不需要此参数。"
                 }
             },
-            "required": [
-                "latitude",
-                "longitude"
-            ]
+            "required": []
         }
     }
 },

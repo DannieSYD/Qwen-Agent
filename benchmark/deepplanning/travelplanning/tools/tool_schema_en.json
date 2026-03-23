@@ -151,23 +151,28 @@
     "type": "function",
     "function": {
         "name": "query_road_route_info",
-        "description": "Calculate and return road route details between two locations, including distance (meters), estimated duration (minutes) and estimated cost (currency). This function automatically selects the transportation mode based on total distance: walking for 2 kilometers or less (cost 0), and driving (taxi) mode for more than 2 kilometers. The estimated cost is for one vehicle, which can accommodate 4 people by default.",
+        "description": "Calculate and return road route details between two locations, including distance (meters), estimated duration (minutes) and estimated cost (currency). This function automatically selects the transportation mode based on total distance: walking for 2 kilometers or less (cost 0), and driving (taxi) mode for more than 2 kilometers. The estimated cost is for one vehicle, which can accommodate 4 people by default. RECOMMENDED: Use origin_place/destination_place with place names (e.g., attraction or hotel names from previous tool results) instead of raw coordinates — the tool will automatically resolve the exact coordinates.",
         "parameters": {
             "type": "object",
             "properties": {
                 "origin": {
                     "type": "string",
-                    "description": "Origin coordinates (format: latitude,longitude), precision retained to 6 decimal places"
+                    "description": "Origin coordinates (format: latitude,longitude), precision retained to 6 decimal places. Not needed if origin_place is provided."
                 },
                 "destination": {
                     "type": "string",
-                    "description": "Destination coordinates (format: latitude,longitude), precision retained to 6 decimal places"
+                    "description": "Destination coordinates (format: latitude,longitude), precision retained to 6 decimal places. Not needed if destination_place is provided."
+                },
+                "origin_place": {
+                    "type": "string",
+                    "description": "Origin place name (e.g., an attraction name, hotel name, or station name from previous tool results). Coordinates are resolved automatically. Preferred over raw origin coordinates."
+                },
+                "destination_place": {
+                    "type": "string",
+                    "description": "Destination place name (e.g., an attraction name, hotel name, or station name from previous tool results). Coordinates are resolved automatically. Preferred over raw destination coordinates."
                 }
             },
-            "required": [
-                "origin",
-                "destination"
-            ]
+            "required": []
         }
     }
 },
@@ -175,23 +180,24 @@
     "type": "function",
     "function": {
         "name": "recommend_restaurants",
-        "description": "Recommend nearby restaurant information based on specified latitude and longitude coordinates. The returned list contains detailed information such as restaurant name, latitude and longitude coordinates, price per person, rating, business hours, etc.",
+        "description": "Recommend nearby restaurant information based on a location. RECOMMENDED: Use the 'near' parameter with a place name (e.g., an attraction name from previous tool results) instead of raw coordinates — the tool will automatically resolve the exact coordinates. Alternatively, you can provide latitude and longitude directly. The returned list contains detailed information such as restaurant name, coordinates, price per person, rating, business hours, etc.",
         "parameters": {
             "type": "object",
             "properties": {
+                "near": {
+                    "type": "string",
+                    "description": "Place name to search restaurants near (e.g., an attraction name, hotel name from previous tool results). Coordinates are resolved automatically. Preferred over raw latitude/longitude."
+                },
                 "latitude": {
                     "type": "string",
-                    "description": "Latitude coordinate, precision retained to 6 decimal places"
+                    "description": "Latitude coordinate, precision retained to 6 decimal places. Not needed if 'near' is provided."
                 },
                 "longitude": {
                     "type": "string",
-                    "description": "Longitude coordinate, precision retained to 6 decimal places"
+                    "description": "Longitude coordinate, precision retained to 6 decimal places. Not needed if 'near' is provided."
                 }
             },
-            "required": [
-                "latitude",
-                "longitude"
-            ]
+            "required": []
         }
     }
 },

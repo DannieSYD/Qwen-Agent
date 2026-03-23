@@ -53,7 +53,7 @@ TRAVEL_MODEL="${BENCHMARK_MODEL}"
 TRAVEL_LANGUAGE="en"
 
 # Number of parallel workers for travel
-TRAVEL_WORKERS=20
+TRAVEL_WORKERS=5
 
 # Maximum LLM calls per sample for travel
 TRAVEL_MAX_LLM_CALLS=400
@@ -69,6 +69,9 @@ TRAVEL_VERBOSE="false"
 
 # Debug mode for travel
 TRAVEL_DEBUG="false"
+
+# Prompt variant for travel: default, explore
+TRAVEL_PROMPT_VARIANT="default"
 
 # ============================================
 # Validate Configuration
@@ -218,6 +221,7 @@ for MODEL in "${MODELS_LIST[@]}"; do
             export BENCHMARK_OUTPUT_DIR="$TRAVEL_OUTPUT_DIR"
             export BENCHMARK_VERBOSE="$TRAVEL_VERBOSE"
             export BENCHMARK_DEBUG="$TRAVEL_DEBUG"
+            export BENCHMARK_PROMPT_VARIANT="$TRAVEL_PROMPT_VARIANT"
             export TRAVEL_AGENT_MODEL="$DOMAIN_MODEL"
         fi
         

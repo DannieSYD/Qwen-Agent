@@ -148,6 +148,11 @@ def parse_args():
     parser.add_argument('--rerun-ids', type=str, default=None,
                        help='Comma-separated list of IDs to rerun (e.g., "0,5,10" or "0-10,15,20-25")')
     
+    # Prompt variant
+    parser.add_argument('--prompt-variant', type=str, default='default',
+                       choices=['default', 'explore', 'guided', 'guided_memory'],
+                       help='Prompt variant to use (default: original, explore: explore-first, guided: light guidance + validator, guided_memory: guided + working memory)')
+
     # Advanced options
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose output')
@@ -171,7 +176,9 @@ def setup_paths(args):
     # Output directory
     # If user didn't specify output_dir (stored in _user_output_dir), generate language-specific path
     user_output_dir = getattr(args, '_user_output_dir', None)
-    dir_name = f"{args.model}_{args.language}"
+    prompt_variant = getattr(args, 'prompt_variant', 'default')
+    variant_suffix = f"_{prompt_variant}" if prompt_variant != 'default' else ''
+    dir_name = f"{args.model}{variant_suffix}_{args.language}"
     
     if user_output_dir is None:
         # Auto-generate: base_dir/results/model_language
@@ -209,6 +216,7 @@ def print_config(args):
     print(f"Output directory:   {args.output_dir}")
     print(f"Database directory: {args.database_dir}")
     print(f"Tool schema:        {args.tool_schema_path}")
+    print(f"Prompt variant:     {getattr(args, 'prompt_variant', 'default')}")
     
     # Pipeline steps
     steps = []
@@ -269,6 +277,7 @@ def run_step_inference(args):
             workers=args.workers,
             max_llm_calls=args.max_llm_calls,
             rerun_ids=rerun_ids,  # Pass rerun_ids parameter
+            prompt_variant=getattr(args, 'prompt_variant', 'default'),
         )
         
         elapsed = time.time() - start_time

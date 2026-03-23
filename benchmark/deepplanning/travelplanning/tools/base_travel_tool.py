@@ -54,7 +54,6 @@ def load_tool_schemas(schema_file: str = 'tool_schema.json', language: str = 'en
                 tool_name = schema['function']['name']
                 schemas[tool_name] = schema['function']
         
-        print(f"✓ Loaded {len(schemas)} tool definitions from {schema_file}")
         return schemas
     except Exception as e:
         print(f"✗ Failed to load tool schema file: {e}")
@@ -101,25 +100,28 @@ def get_cached_tool_schemas(language: str = 'en') -> Dict[str, dict]:
 class BaseTravelTool(BaseTool):
     """
     Base class for travel tools, extending qwen-agent's BaseTool
-    
+
     Design principles:
     1. Inherits from qwen-agent framework's BaseTool
     2. Adds travel-specific functionality (database loading, result formatting)
     3. Supports automatic schema loading from JSON files
     4. Compatible with OpenAI Function Calling and other formats
-    
+
     Usage:
     ```python
     @register_tool('query_train_info')
     class TrainQueryTool(BaseTravelTool):
         # Schema will be auto-loaded from tool_schema.json in __init__
-        
+
         def call(self, params, **kwargs):
             # Your implementation
         pass
     ```
     """
-    
+
+    # Class-level verbose flag: set to False to suppress database loading messages
+    verbose = os.environ.get('TOOL_VERBOSE', '0') == '1'
+
     def __init__(self, cfg: Optional[Dict] = None):
         """
         Initialize travel tool
@@ -146,6 +148,11 @@ class BaseTravelTool(BaseTool):
         # Initialize travel-specific attributes
         self.database_path = None
         self.data = None
+
+    def _log(self, msg: str):
+        """Print message only if verbose mode is enabled."""
+        if self.__class__.verbose:
+            print(msg)
     
     def _load_schema_from_json(self):
         """Load tool schema from language-specific JSON file"""
@@ -221,7 +228,6 @@ class BaseTravelTool(BaseTool):
                 
                 import pandas as pd
                 PANDAS_AVAILABLE = pd
-                print("✓ pandas imported successfully")
             except Exception as e:
                 PANDAS_AVAILABLE = False
                 raise ImportError(

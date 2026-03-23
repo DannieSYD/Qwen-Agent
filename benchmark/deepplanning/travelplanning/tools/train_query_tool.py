@@ -45,10 +45,10 @@ class TrainQueryTool(BaseTravelTool):
         # Load database
         if self.database_path and os.path.exists(self.database_path):
             self.data = self.load_csv_database(self.database_path)
-            print(self.fields['db_loaded'](len(self.data), self.database_path))
+            self._log(self.fields['db_loaded'](len(self.data), self.database_path))
         else:
             if self.database_path:
-                print(self.fields['db_not_found'](self.database_path))
+                self._log(self.fields['db_not_found'](self.database_path))
             self.data = None
     
     def call(self, params: Union[str, dict], **kwargs) -> str:

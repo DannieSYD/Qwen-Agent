@@ -10,7 +10,7 @@
     "qwen3-30b-a3b-thinking-2507": {
       "model_name": "Qwen/Qwen3-30B-A3B-Thinking-2507",
       "model_type": "openai",
-      "base_url": "http://localhost:8051/v1",
+      "base_url": "http://scai4.cs.ucla.edu:8051/v1",
       "api_key_env": "VLLM_API_KEY",
       "temperature": 0.6
     },

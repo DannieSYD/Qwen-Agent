@@ -155,12 +155,19 @@ class ToolsFnAgent:
             'recommend_restaurants': 'restaurants/restaurants.csv',
             'query_restaurant_details': 'restaurants/restaurants.csv',
         }
-        
+
         if tool_name in db_mapping:
             db_path = sample_db_path / db_mapping[tool_name]
             if db_path.exists():
                 cfg['database_path'] = str(db_path)
-        
+
+        # Pass location database path to compound tools (restaurants, road routes)
+        # so they can internally resolve place names → coordinates
+        if tool_name in ('recommend_restaurants', 'query_road_route_info'):
+            location_db_path = sample_db_path / 'locations' / 'locations_coords.csv'
+            if location_db_path.exists():
+                cfg['location_database_path'] = str(location_db_path)
+
         return cfg
     
     def _load_tool_instances(self) -> Dict[str, Any]:
@@ -221,6 +228,116 @@ class ToolsFnAgent:
             return res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    def _auto_query_routes(self, tool_name: str, arguments_json: str, memory) -> str:
+        """
+        After certain tool calls, automatically query road routes between
+        newly-discovered locations and existing known locations (hotel, attractions).
+        This gives the model travel-time info for free (Option C).
+
+        Returns a string summarizing auto-queried routes, or empty string.
+        """
+        if tool_name not in ('recommend_restaurants', 'query_attraction_details',
+                             'query_hotel_info', 'recommend_attractions'):
+            return ""
+
+        route_tool = self.tool_instances.get('query_road_route_info')
+        if not route_tool:
+            return ""
+
+        # Determine which new locations to compute routes for
+        try:
+            args = json.loads(arguments_json) if arguments_json else {}
+        except json.JSONDecodeError:
+            args = {}
+
+        # Gather "anchor" locations: hotels and the current queried entity
+        anchors = {}  # name -> "lat,lon"
+        for h in memory.hotels:
+            if h.get('lat', '?') != '?' and h.get('lon', '?') != '?':
+                anchors[h['name']] = f"{h['lat']},{h['lon']}"
+
+        # Gather "target" locations: newly added locations from this tool call
+        targets = {}  # name -> "lat,lon"
+
+        if tool_name == 'recommend_restaurants':
+            # Route from the 'near' attraction/hotel to each restaurant
+            near = args.get('near', None)
+            if near and near in memory.locations:
+                loc = memory.locations[near]
+                anchors[near] = f"{loc['lat']},{loc['lon']}"
+            for r in memory.restaurants:
+                if r.get('lat', '?') != '?' and r.get('lon', '?') != '?':
+                    targets[r['name']] = f"{r['lat']},{r['lon']}"
+
+        elif tool_name == 'query_attraction_details':
+            attr_name = args.get('attraction_name', '')
+            if attr_name in memory.attractions_detail:
+                d = memory.attractions_detail[attr_name]
+                if d.get('lat', '?') != '?' and d.get('lon', '?') != '?':
+                    targets[attr_name] = f"{d['lat']},{d['lon']}"
+            # Also add other attractions as targets to get inter-attraction routes
+            for name, d in memory.attractions_detail.items():
+                if d.get('lat', '?') != '?' and d.get('lon', '?') != '?':
+                    if name not in anchors:
+                        targets[name] = f"{d['lat']},{d['lon']}"
+
+        elif tool_name == 'query_hotel_info':
+            # New hotel added — compute routes to all known attractions
+            for name, d in memory.attractions_detail.items():
+                if d.get('lat', '?') != '?' and d.get('lon', '?') != '?':
+                    targets[name] = f"{d['lat']},{d['lon']}"
+
+        if not anchors or not targets:
+            return ""
+
+        # Compute routes between anchors and targets (skip duplicates)
+        existing_routes = set()
+        for r in memory.routes:
+            existing_routes.add((r.get('origin_coords', ''), r.get('dest_coords', '')))
+
+        route_lines = []
+        queries_done = 0
+        MAX_AUTO_ROUTES = 20  # Cap to avoid explosion
+
+        for anchor_name, anchor_coord in anchors.items():
+            for target_name, target_coord in targets.items():
+                if anchor_name == target_name:
+                    continue
+                if anchor_coord == target_coord:
+                    continue
+                if (anchor_coord, target_coord) in existing_routes:
+                    continue
+                if queries_done >= MAX_AUTO_ROUTES:
+                    break
+
+                try:
+                    result = route_tool.call({
+                        'origin': anchor_coord,
+                        'destination': target_coord
+                    })
+                    # Parse and store in memory
+                    ack = memory.process_tool_result(
+                        'query_road_route_info',
+                        json.dumps({
+                            'origin': anchor_coord,
+                            'destination': target_coord,
+                            'origin_place': anchor_name,
+                            'destination_place': target_name
+                        }),
+                        result
+                    )
+                    route_lines.append(ack)
+                    queries_done += 1
+                except Exception:
+                    continue
+            if queries_done >= MAX_AUTO_ROUTES:
+                break
+
+        if route_lines:
+            header = f"[Auto-computed {queries_done} travel routes]"
+            return header + "\n" + "\n".join(route_lines)
+        return ""
 
     def _call_llm(self, messages: List[Any], tools: Optional[List[Dict[str, Any]]] = None):
         """Call LLM with unified handling for all models"""
@@ -336,7 +453,8 @@ class ToolsFnAgent:
     def run(self,
             user_query: str,
             system_prompt: Optional[str] = None,
-            max_llm_calls: int = 100) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
+            max_llm_calls: int = 100,
+            enable_memory: bool = False) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """
         Agent main loop: Call LLM → Execute tools → Repeat until final answer
 
@@ -344,10 +462,21 @@ class ToolsFnAgent:
             user_query: User query
             system_prompt: System prompt
             max_llm_calls: Maximum LLM calls
+            enable_memory: If True, use working memory to replace raw tool outputs
+                           with structured summaries + accumulated memory snapshot
 
         Returns:
             (final_plan, messages, token_usage): Final plan, complete message history, and token usage
         """
+        # Initialize working memory if enabled
+        memory = None
+        if enable_memory:
+            try:
+                from working_memory import WorkingMemory
+            except ImportError:
+                from agent.working_memory import WorkingMemory
+            memory = WorkingMemory(language=self.language)
+
         messages: List[Dict[str, Any]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -378,6 +507,79 @@ class ToolsFnAgent:
                 # Execute tool calls
                 for call in calls:
                     tool_result = self._exec_tool(call['name'], call['arguments'])
+
+                    if memory:
+                        # Process through working memory: parse + store
+                        processed = memory.process_tool_result(
+                            call['name'], call['arguments'], tool_result
+                        )
+
+                        # --- Auto-attach route info (Option C) ---
+                        # After restaurants or attraction details, auto-query routes
+                        # between known locations so the model gets travel times for free
+                        auto_route_lines = self._auto_query_routes(call['name'], call['arguments'], memory)
+
+                        # Replace raw output with: acknowledgment + auto-routes + full memory snapshot
+                        tool_content = processed
+                        if auto_route_lines:
+                            tool_content += "\n\n" + auto_route_lines
+                        tool_content += "\n\n" + memory.render_snapshot()
+                    else:
+                        tool_content = tool_result
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call['id'],
+                        "name": call['name'],
+                        "content": tool_content,
+                    })
+                continue
+
+            # No tool calls → Return final answer
+            final_content = self._extract_plan_content(msg.content or '')
+            token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
+            return final_content, messages, token_usage
+
+        token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
+        return "Reached max LLM calls without final answer.", messages, token_usage
+
+    def continue_run(self,
+                     messages: List[Any],
+                     max_llm_calls: int = 20) -> Tuple[str, List[Any], Dict[str, int]]:
+        """
+        Continue agent loop from existing message history.
+        Used for correction rounds after validation.
+
+        Args:
+            messages: Existing message history (will be mutated in-place)
+            max_llm_calls: Maximum additional LLM calls
+
+        Returns:
+            (final_plan, messages, token_usage): Same as run()
+        """
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_tokens = 0
+
+        llm_budget = max_llm_calls
+
+        while llm_budget > 0:
+            llm_budget -= 1
+
+            resp = self._call_llm(messages=messages, tools=self.openai_tools)
+
+            usage = getattr(resp, 'usage', None)
+            if usage:
+                total_prompt_tokens += getattr(usage, 'prompt_tokens', 0) or 0
+                total_completion_tokens += getattr(usage, 'completion_tokens', 0) or 0
+                total_tokens += getattr(usage, 'total_tokens', 0) or 0
+
+            msg = resp.choices[0].message
+            calls = self._detect_tool_calls(msg)
+            messages.append(msg)
+            if calls:
+                for call in calls:
+                    tool_result = self._exec_tool(call['name'], call['arguments'])
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call['id'],
@@ -386,7 +588,6 @@ class ToolsFnAgent:
                     })
                 continue
 
-            # No tool calls → Return final answer
             final_content = self._extract_plan_content(msg.content or '')
             token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
             return final_content, messages, token_usage
@@ -405,6 +606,7 @@ def run_agent_inference(
     workers: int = 10,
     max_llm_calls: int = 100,
     rerun_ids: Optional[List[int]] = None,
+    prompt_variant: str = 'default',
 ) -> Dict[str, Any]:
     """
     Run agent inference (batch processing)
@@ -419,7 +621,8 @@ def run_agent_inference(
         workers: Number of parallel workers
         max_llm_calls: Maximum LLM calls per sample
         rerun_ids: Optional list of specific IDs to rerun. If None, run all samples.
-    
+        prompt_variant: Prompt variant to use ('default' or 'explore')
+
     Returns:
         Results summary dict
     """
@@ -456,10 +659,31 @@ def run_agent_inference(
     (output_dir / 'trajectories').mkdir(exist_ok=True)
     (output_dir / 'reports').mkdir(exist_ok=True)
     
-    try:
-        from prompts import get_system_prompt
-    except ImportError:
-        from agent.prompts import get_system_prompt
+    if prompt_variant in ('guided', 'guided_memory'):
+        try:
+            from prompts_guided import get_system_prompt
+        except ImportError:
+            from agent.prompts_guided import get_system_prompt
+    elif prompt_variant == 'explore':
+        try:
+            from prompts_explore import get_system_prompt
+        except ImportError:
+            from agent.prompts_explore import get_system_prompt
+    else:
+        try:
+            from prompts import get_system_prompt
+        except ImportError:
+            from agent.prompts import get_system_prompt
+
+    # Import validator for guided variants
+    if prompt_variant in ('guided', 'guided_memory'):
+        try:
+            from plan_validator import validate_plan, build_correction_message
+        except ImportError:
+            from agent.plan_validator import validate_plan, build_correction_message
+
+    # Enable working memory for guided_memory variant
+    enable_memory = (prompt_variant == 'guided_memory')
     
     print_lock = Lock()
     results = []
@@ -482,12 +706,46 @@ def run_agent_inference(
             
             system_prompt = get_system_prompt(language)
             start_time = time.time()
-            
+
             final_plan, full_messages, token_usage = agent.run(
                 user_query=query,
                 system_prompt=system_prompt,
-                max_llm_calls=max_llm_calls
+                max_llm_calls=max_llm_calls,
+                enable_memory=enable_memory,
             )
+
+            # Validation loop for guided variants (max 2 correction rounds)
+            if prompt_variant in ('guided', 'guided_memory') and final_plan and final_plan != "Reached max LLM calls without final answer.":
+                max_corrections = 2
+                for correction_round in range(max_corrections):
+                    serialized_for_validation = agent._serialize_messages(full_messages)
+                    validation = validate_plan(final_plan, serialized_for_validation, language)
+
+                    if validation['valid']:
+                        with print_lock:
+                            print(f"  ✅ {sample_id}: Plan passed validation (round {correction_round})")
+                        break
+
+                    with print_lock:
+                        print(f"  🔄 {sample_id}: Validation found {validation['total_hallucinated']} hallucinated entities (round {correction_round + 1}/{max_corrections})")
+
+                    # Send correction message and continue from existing messages
+                    correction_msg = build_correction_message(validation, language)
+                    full_messages.append({"role": "user", "content": correction_msg})
+
+                    # Continue agent from current message history
+                    corrected_plan, full_messages, extra_usage = agent.continue_run(
+                        messages=full_messages,
+                        max_llm_calls=max(20, max_llm_calls // 4),
+                    )
+
+                    # Accumulate token usage
+                    token_usage['prompt_tokens'] += extra_usage.get('prompt_tokens', 0)
+                    token_usage['completion_tokens'] += extra_usage.get('completion_tokens', 0)
+                    token_usage['total_tokens'] += extra_usage.get('total_tokens', 0)
+
+                    if corrected_plan and corrected_plan != "Reached max LLM calls without final answer.":
+                        final_plan = corrected_plan
 
             elapsed = time.time() - start_time
 
