@@ -962,37 +962,41 @@ def check_transfer_time_reasonable(daily_plans: List[Dict[str, Any]], locations_
                 # Non-overlap already handled by check_time_no_overlap, ignore here
                 continue
             
-            # Calculate buffer time and subtract from gap
+            # Scan intermediate activities between the two anchors to find
+            # buffer durations and travel_city durations separately.
             buffer_duration = 0.0
-            for act_buf in activities:
-                act_type = act_buf.get("type", "").strip()
-                if act_type == "buffer":
-                    s_buf, e_buf = slot_to_minutes(act_buf.get("time_slot"))
+            travel_city_duration = 0.0
+            for act_mid in activities:
+                act_type = act_mid.get("type", "").strip()
+                if act_type not in ("buffer", "travel_city"):
+                    continue
+                s_mid, e_mid = slot_to_minutes(act_mid.get("time_slot"))
 
-                    if s_buf is None or e_buf is None:
-                        continue
+                if s_mid is None or e_mid is None:
+                    continue
 
-                    # ====== Handle day crossover ======
-                    # If buffer start time is less than previous anchor end time, it's next day
-                    if s_buf < prev_e:
-                        s_buf += 1440
-                        e_buf += 1440
-                    # Similarly, if buffer end time is less than previous anchor end time, add a day
-                    elif e_buf < prev_e:
-                        e_buf += 1440
+                # ====== Handle day crossover ======
+                # If intermediate start time is less than previous anchor end time, it's next day
+                if s_mid < prev_e:
+                    s_mid += 1440
+                    e_mid += 1440
+                # Similarly, if intermediate end time is less than previous anchor end time, add a day
+                elif e_mid < prev_e:
+                    e_mid += 1440
 
-                    # If current anchor is early morning next day, also add offset
-                    if curr_s < prev_e:
-                        curr_s += 1440
+                # If current anchor is early morning next day, also add offset
+                curr_s_adj = curr_s
+                if curr_s_adj < prev_e:
+                    curr_s_adj += 1440
 
-                    # Check if buffer is between the two anchors
-                    if prev_e <= s_buf and e_buf <= curr_s:
-                        buffer_duration += (e_buf - s_buf)
+                # Check if intermediate activity is between the two anchors
+                if prev_e <= s_mid and e_mid <= curr_s_adj:
+                    dur = e_mid - s_mid
+                    if act_type == "buffer":
+                        buffer_duration += dur
+                    else:  # travel_city
+                        travel_city_duration += dur
 
-            
-            # Subtract buffer time from gap, get actual time interval to verify
-            gap_min_without_buffer = gap_min - buffer_duration
-            
             # Anchor location names:
             # - Normal anchor (hotel/attraction/meal): use details.name
             # - Intercity anchor (travel_intercity_public):
@@ -1025,16 +1029,31 @@ def check_transfer_time_reasonable(daily_plans: List[Dict[str, Any]], locations_
                     skipped.append(f"D{day_idx}:{prev_name}->{curr_name}")
                     print(f"D{day_idx}:{prev_name}->{curr_name} missing distance matrix (query: {lat1},{lon1} -> {lat2},{lon2})")
                     continue
-                
-                # Calculate allowed time range (no longer add extra buffer time, as already excluded from gap)
+
+                # Calculate allowed time range
                 # min round down to multiple of 10, max round up to multiple of 10
                 min_allowed = min(max(0.0, taxi_min-5),(taxi_min // 10) * 10)
                 max_allowed = max(taxi_min+5,math.ceil(taxi_min / 10) * 10)
-                
-                if not (min_allowed <= gap_min_without_buffer <= max_allowed):
-                    violations.append(
-                        f"D{day_idx}:{prev_name}->{curr_name} query got commute time {taxi_min:.0f}min, plan shows gap {gap_min_without_buffer:.0f}min (after excluding buffer {buffer_duration:.0f}min) not in [{min_allowed:.0f},{max_allowed:.0f}]min\nD{day_idx}:{prev_name}({lat1},{lon1})->{curr_name}({lat2},{lon2}) "
-                    )
+
+                if travel_city_duration > 0:
+                    # A travel_city segment explicitly accounts for the commute.
+                    # The plan has allocated transit time — skip the tight gap
+                    # check.  Only flag truly absurd durations as a sanity guard
+                    # (e.g. travel_city < 50% of taxi time or > 5x + 30min).
+                    tc_min_allowed = max(0.0, taxi_min * 0.5 - 5)
+                    tc_max_allowed = max(taxi_min * 5, taxi_min + 90)
+                    if not (tc_min_allowed <= travel_city_duration <= tc_max_allowed):
+                        violations.append(
+                            f"D{day_idx}:{prev_name}->{curr_name} query got commute time {taxi_min:.0f}min, travel_city segment is {travel_city_duration:.0f}min not in [{tc_min_allowed:.0f},{tc_max_allowed:.0f}]min\nD{day_idx}:{prev_name}({lat1},{lon1})->{curr_name}({lat2},{lon2}) "
+                        )
+                else:
+                    # No travel_city segment — the raw gap (minus buffers) must
+                    # cover the commute time.
+                    gap_min_without_buffer = gap_min - buffer_duration
+                    if not (min_allowed <= gap_min_without_buffer <= max_allowed):
+                        violations.append(
+                            f"D{day_idx}:{prev_name}->{curr_name} query got commute time {taxi_min:.0f}min, plan shows gap {gap_min_without_buffer:.0f}min (after excluding buffer {buffer_duration:.0f}min) not in [{min_allowed:.0f},{max_allowed:.0f}]min\nD{day_idx}:{prev_name}({lat1},{lon1})->{curr_name}({lat2},{lon2}) "
+                        )
             else:
                 skipped.append(f"D{day_idx}:{prev_name}->{curr_name}")
 

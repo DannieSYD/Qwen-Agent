@@ -129,8 +129,9 @@ def call_llm(
     backoff = model_config.get('backoff', 1.5)
     tool_choice = model_config.get('tool_choice', 'auto')
     extra_body = model_config.get('extra_body')  # Get from config
-    
-    # Detect reasoning models (don't support temperature)
+    max_tokens = model_config.get('max_tokens')  # None by default; set per-model in config
+
+    # Detect reasoning models (don't support temperature, use max_completion_tokens)
     is_reasoning_model = any(x in actual_model_name.lower() for x in ['o1', 'o3', 'o4-mini', 'reasoner'])
     
     last_err = None
@@ -147,7 +148,15 @@ def call_llm(
             
             if not is_reasoning_model and temperature:
                 params["temperature"] = temperature
-            
+
+            # Set output token limit. Reasoning models (o1/o3) use
+            # max_completion_tokens; standard models use max_tokens.
+            if max_tokens:
+                if is_reasoning_model:
+                    params["max_completion_tokens"] = max_tokens
+                else:
+                    params["max_tokens"] = max_tokens
+
             if extra_body:
                 params["extra_body"] = extra_body
             response = client.chat.completions.create(**params)
@@ -164,10 +173,16 @@ def call_llm(
             
         except Exception as e:
             last_err = e
-            
+
+            # Don't retry context-length errors — they are deterministic
+            err_str = str(e)
+            if 'context length' in err_str or 'maximum context' in err_str.lower():
+                print(f"  ❌ Context length exceeded (non-retryable): {e}")
+                raise
+
             if attempt == max_retries - 1:
                 raise
-            
+
             wait_time = backoff
             print(f"  ⚠️  LLM API error (attempt {attempt + 1}/{max_retries}): {e}")
             print(f"     Retrying in {wait_time:.1f}s...")

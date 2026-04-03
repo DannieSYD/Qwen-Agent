@@ -18,6 +18,54 @@ except ImportError:
     from call_llm import call_llm
 
 
+ASSEMBLE_DAY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "assemble_day",
+        "description": (
+            "Build a fully-formatted day plan with correct timestamps, travel times, "
+            "distances, and costs. You specify the sequence of activities; the tool "
+            "computes all times deterministically from working memory data. "
+            "Auto-inserts travel_city segments between locations. "
+            "Returns formatted day text or errors if data is missing."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "day": {"type": "integer", "description": "Day number (1-indexed)"},
+                "current_city": {"type": "string", "description": "e.g. 'from Shanghai to Beijing' or 'Beijing'"},
+                "accommodation": {"type": "string", "description": "Hotel name from memory, or '-' for departure day"},
+                "accommodation_price": {"type": "string", "description": "e.g. '¥200/room/night', or '-'"},
+                "activities": {
+                    "type": "array",
+                    "description": "Ordered list of activities for the day",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["intercity", "attraction", "meal", "hotel", "buffer"],
+                                "description": "Activity type"
+                            },
+                            "transport_type": {"type": "string", "enum": ["train", "flight"], "description": "For intercity: train or flight"},
+                            "id": {"type": "string", "description": "For intercity: train/flight number (e.g. 'G7798')"},
+                            "name": {"type": "string", "description": "For attraction: exact name from memory"},
+                            "meal_type": {"type": "string", "enum": ["Lunch", "Dinner"], "description": "For meal: Lunch or Dinner"},
+                            "restaurant": {"type": "string", "description": "For meal: exact restaurant name from memory"},
+                            "action": {"type": "string", "enum": ["Check-in", "Check-out", "Rest"], "description": "For hotel activity"},
+                            "description": {"type": "string", "description": "For buffer: description text"},
+                            "duration_min": {"type": "integer", "description": "For buffer/hotel/meal: duration in minutes"}
+                        },
+                        "required": ["type"]
+                    }
+                }
+            },
+            "required": ["day", "current_city", "accommodation", "activities"]
+        }
+    }
+}
+
+
 class ToolsFnAgent:
     """
     Lightweight function-calling Agent (framework-independent):
@@ -251,17 +299,20 @@ class ToolsFnAgent:
         except json.JSONDecodeError:
             args = {}
 
-        # Gather "anchor" locations: hotels and the current queried entity
-        anchors = {}  # name -> "lat,lon"
+        # Only compute routes between hotels (anchors) and attractions (targets).
+        # Skip hotel-hotel and attraction-attraction pairs to avoid context bloat.
+        anchors = {}  # name -> "lat,lon" (hotels only)
         for h in memory.hotels:
             if h.get('lat', '?') != '?' and h.get('lon', '?') != '?':
                 anchors[h['name']] = f"{h['lat']},{h['lon']}"
 
-        # Gather "target" locations: newly added locations from this tool call
-        targets = {}  # name -> "lat,lon"
+        targets = {}  # name -> "lat,lon" (attractions only)
+        for name, d in memory.attractions_detail.items():
+            if d.get('lat', '?') != '?' and d.get('lon', '?') != '?':
+                targets[name] = f"{d['lat']},{d['lon']}"
 
         if tool_name == 'recommend_restaurants':
-            # Route from the 'near' attraction/hotel to each restaurant
+            # Also add: nearby attraction → each restaurant
             near = args.get('near', None)
             if near and near in memory.locations:
                 loc = memory.locations[near]
@@ -269,24 +320,6 @@ class ToolsFnAgent:
             for r in memory.restaurants:
                 if r.get('lat', '?') != '?' and r.get('lon', '?') != '?':
                     targets[r['name']] = f"{r['lat']},{r['lon']}"
-
-        elif tool_name == 'query_attraction_details':
-            attr_name = args.get('attraction_name', '')
-            if attr_name in memory.attractions_detail:
-                d = memory.attractions_detail[attr_name]
-                if d.get('lat', '?') != '?' and d.get('lon', '?') != '?':
-                    targets[attr_name] = f"{d['lat']},{d['lon']}"
-            # Also add other attractions as targets to get inter-attraction routes
-            for name, d in memory.attractions_detail.items():
-                if d.get('lat', '?') != '?' and d.get('lon', '?') != '?':
-                    if name not in anchors:
-                        targets[name] = f"{d['lat']},{d['lon']}"
-
-        elif tool_name == 'query_hotel_info':
-            # New hotel added — compute routes to all known attractions
-            for name, d in memory.attractions_detail.items():
-                if d.get('lat', '?') != '?' and d.get('lon', '?') != '?':
-                    targets[name] = f"{d['lat']},{d['lon']}"
 
         if not anchors or not targets:
             return ""
@@ -339,6 +372,49 @@ class ToolsFnAgent:
             return header + "\n" + "\n".join(route_lines)
         return ""
 
+    def _auto_query_attraction_details(self, tool_name: str, memory) -> str:
+        """
+        After recommend_attractions, automatically query details for all
+        attractions that don't have details yet. This ensures coordinates
+        are available for route computation and the model has full info.
+
+        Returns a string summarizing auto-queried details, or empty string.
+        """
+        if tool_name != 'recommend_attractions':
+            return ""
+
+        detail_tool = self.tool_instances.get('query_attraction_details')
+        if not detail_tool:
+            return ""
+
+        # Find attractions from recommendations that lack details
+        unqueried = []
+        for entry in memory.attractions_summary:
+            name = entry.get('name', '')
+            if name and name not in memory.attractions_detail:
+                unqueried.append(name)
+
+        if not unqueried:
+            return ""
+
+        detail_lines = []
+        for attr_name in unqueried:
+            try:
+                result = detail_tool.call({'attraction_name': attr_name})
+                ack = memory.process_tool_result(
+                    'query_attraction_details',
+                    json.dumps({'attraction_name': attr_name}),
+                    result
+                )
+                detail_lines.append(ack)
+            except Exception:
+                continue
+
+        if detail_lines:
+            header = f"[Auto-queried {len(detail_lines)} attraction details]"
+            return header + "\n" + "\n".join(detail_lines)
+        return ""
+
     def _call_llm(self, messages: List[Any], tools: Optional[List[Dict[str, Any]]] = None):
         """Call LLM with unified handling for all models"""
         # Pass messages directly - OpenAI SDK can handle both dict and object formats
@@ -375,23 +451,30 @@ class ToolsFnAgent:
         return calls
 
     def _extract_plan_content(self, text: str) -> str:
-        """Extract content from <plan>...</plan> tags"""
+        """Extract content from <plan>...</plan> tags, with fallback for truncated output."""
         if not text:
             return ""
-        
+
         # Remove <think>...</think> sections
         think_end_matches = list(re.finditer(r"</think>", text, flags=re.IGNORECASE))
         if think_end_matches:
             last_think_end = think_end_matches[-1]
             text = text[last_think_end.end():]
-        
+
         # Extract <plan>...</plan>
         matches = re.findall(r"<plan>(.*?)</plan>", text, flags=re.DOTALL | re.IGNORECASE)
-        if not matches:
-            return ""
-        
-        cleaned = [m.strip() for m in matches if m.strip()]
-        return "\n\n".join(cleaned) if cleaned else ""
+        if matches:
+            cleaned = [m.strip() for m in matches if m.strip()]
+            return "\n\n".join(cleaned) if cleaned else ""
+
+        # Fallback: extract from last <plan> to end of text (truncated response)
+        last_plan_idx = text.lower().rfind('<plan>')
+        if last_plan_idx >= 0:
+            content = text[last_plan_idx + 6:].strip()
+            if content:
+                return content
+
+        return ""
 
     def _message_to_dict(self, msg) -> Dict[str, Any]:
         """Convert message object to serializable dictionary"""
@@ -450,11 +533,140 @@ class ToolsFnAgent:
             serialized.append(self._message_to_dict(msg))
         return serialized
 
+    @staticmethod
+    def _compress_previous_msgs(messages: list) -> None:
+        """Compress older messages to save context window space.
+
+        Applied **in-place** before each LLM call.  Two concerns:
+
+        1. **Assistant reasoning bloat** — Thinking models emit verbose
+           chain-of-thought directly in ``content``.  For past turns this is
+           no longer useful.
+        2. **Repeated memory snapshots** — Each tool result includes a full
+           ``═══ WORKING MEMORY … ═══`` snapshot.  Only the most recent
+           snapshot matters; older ones are redundant.
+
+        Rules:
+        - Assistant msgs with tool_calls → truncate content to 200 chars.
+        - Assistant msgs with <plan> → keep only the <plan> block.
+        - Tool msgs → strip working-memory snapshot from all but the last
+          tool message (the latest snapshot is kept intact).
+        - Strips ``<think>`` blocks and orphan ``</think>`` tags everywhere.
+        """
+        _MEMORY_RE = re.compile(
+            r'\n*═══ WORKING MEMORY.*?═══ END WORKING MEMORY ═══',
+            re.DOTALL,
+        )
+
+        # --- Find the index of the LAST tool message so we preserve its snapshot ---
+        last_tool_idx = -1
+        for i in range(len(messages) - 1, -1, -1):
+            m = messages[i]
+            role = m.get('role') if isinstance(m, dict) else getattr(m, 'role', None)
+            if role == 'tool':
+                last_tool_idx = i
+                break
+
+        for idx, msg in enumerate(messages):
+            if isinstance(msg, dict):
+                role = msg.get('role')
+                content = msg.get('content')
+            else:
+                role = getattr(msg, 'role', None)
+                content = getattr(msg, 'content', None)
+
+            if not content:
+                continue
+
+            # --- Tool messages: strip old memory snapshots ---
+            if role == 'tool' and idx != last_tool_idx:
+                stripped = _MEMORY_RE.sub('', content).strip()
+                if stripped:
+                    if isinstance(msg, dict):
+                        msg['content'] = stripped
+                    else:
+                        msg.content = stripped
+                continue
+
+            if role != 'assistant':
+                continue
+
+            # --- Assistant messages ---
+            has_tc = (msg.get('tool_calls') if isinstance(msg, dict)
+                      else getattr(msg, 'tool_calls', None))
+            has_tc = bool(has_tc)
+
+            # Strip <think>…</think> and orphan </think>
+            cleaned = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL | re.IGNORECASE)
+            cleaned = re.sub(r'<think>.*', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+            cleaned = re.sub(r'</think>\s*', '', cleaned, flags=re.IGNORECASE)
+            cleaned = cleaned.strip()
+
+            if has_tc:
+                # Content is reasoning only — truncate aggressively
+                if len(cleaned) > 200:
+                    cleaned = cleaned[:200] + '…[reasoning truncated]'
+            else:
+                # If there's a <plan> block, keep only that
+                plan_match = re.search(r'(<plan>.*?</plan>)', cleaned, flags=re.DOTALL | re.IGNORECASE)
+                if plan_match:
+                    cleaned = plan_match.group(1)
+
+            if isinstance(msg, dict):
+                msg['content'] = cleaned or content
+            else:
+                msg.content = cleaned or content
+
+    @staticmethod
+    def _compact_tool_output(tool_name: str, raw_output: str) -> str:
+        """Strip coordinates and non-essential fields from tool outputs for harness_v1.
+
+        Keeps only fields the model needs for planning decisions. Removes latitude,
+        longitude, coordinates, IDs, and addresses that add noise."""
+        # Remove auto-resolved coordinate lines
+        lines = raw_output.split('\n')
+        lines = [l for l in lines if not l.strip().startswith('[Auto-resolved location')]
+        output = '\n'.join(lines).strip()
+
+        try:
+            parsed = json.loads(output)
+        except (json.JSONDecodeError, TypeError):
+            # Text format (e.g., attraction details) — strip coordinate lines
+            result_lines = []
+            for line in output.split('\n'):
+                lower = line.lower()
+                if any(kw in lower for kw in ('latitude', 'longitude', 'coordinates', 'attraction id')):
+                    continue
+                if 'address' in lower and 'nan' in lower:
+                    continue
+                result_lines.append(line)
+            return '\n'.join(result_lines).strip()
+
+        # JSON format — strip fields from dicts
+        strip_keys = {'latitude', 'longitude', 'address', 'id'}
+
+        def clean_dict(d: dict) -> dict:
+            return {k: v for k, v in d.items() if k.lower() not in strip_keys}
+
+        if isinstance(parsed, list):
+            cleaned = [clean_dict(item) if isinstance(item, dict) else item for item in parsed]
+        elif isinstance(parsed, dict):
+            cleaned = clean_dict(parsed)
+            # For road route, also strip origin/destination coordinate strings
+            if tool_name == 'query_road_route_info':
+                cleaned.pop('origin', None)
+                cleaned.pop('destination', None)
+        else:
+            return output
+
+        return json.dumps(cleaned, ensure_ascii=False, indent=2)
+
     def run(self,
             user_query: str,
             system_prompt: Optional[str] = None,
             max_llm_calls: int = 100,
-            enable_memory: bool = False) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
+            enable_memory: bool = False,
+            compact_outputs: bool = False) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """
         Agent main loop: Call LLM → Execute tools → Repeat until final answer
 
@@ -464,6 +676,8 @@ class ToolsFnAgent:
             max_llm_calls: Maximum LLM calls
             enable_memory: If True, use working memory to replace raw tool outputs
                            with structured summaries + accumulated memory snapshot
+            compact_outputs: If True, strip coordinates and non-essential fields from
+                           tool outputs before passing to the model (harness_v1)
 
         Returns:
             (final_plan, messages, token_usage): Final plan, complete message history, and token usage
@@ -477,6 +691,12 @@ class ToolsFnAgent:
                 from agent.working_memory import WorkingMemory
             memory = WorkingMemory(language=self.language)
 
+        # When memory is enabled, add the assemble_day tool so the model can
+        # build day plans with deterministic timestamps from working memory.
+        tools_for_llm = self.openai_tools
+        if enable_memory:
+            tools_for_llm = self.openai_tools + [ASSEMBLE_DAY_SCHEMA]
+
         messages: List[Dict[str, Any]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -485,13 +705,18 @@ class ToolsFnAgent:
         total_prompt_tokens = 0
         total_completion_tokens = 0
         total_tokens = 0
+        empty_plan_retries = 0
 
         llm_budget = max_llm_calls
 
         while llm_budget > 0:
             llm_budget -= 1
 
-            resp = self._call_llm(messages=messages, tools=self.openai_tools)
+            # Compress reasoning in older assistant messages to free context
+            if compact_outputs:
+                self._compress_previous_msgs(messages)
+
+            resp = self._call_llm(messages=messages, tools=tools_for_llm)
 
             # Accumulate token usage
             usage = getattr(resp, 'usage', None)
@@ -502,25 +727,53 @@ class ToolsFnAgent:
 
             msg = resp.choices[0].message
             calls = self._detect_tool_calls(msg)
+
             messages.append(msg)
             if calls:
                 # Execute tool calls
                 for call in calls:
+                    # --- Special handling: assemble_day is a memory-side tool ---
+                    if call['name'] == 'assemble_day' and memory:
+                        try:
+                            args = json.loads(call['arguments']) if call['arguments'] else {}
+                        except json.JSONDecodeError:
+                            args = {}
+                        tool_content = memory.assemble_day(args)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call['id'],
+                            "name": call['name'],
+                            "content": tool_content,
+                        })
+                        continue
+
                     tool_result = self._exec_tool(call['name'], call['arguments'])
 
                     if memory:
-                        # Process through working memory: parse + store
+                        # Process through working memory BEFORE compacting,
+                        # so memory gets full data (coordinates, etc.)
                         processed = memory.process_tool_result(
                             call['name'], call['arguments'], tool_result
                         )
+
+                    # Compact tool output if enabled (strip coords, non-essential fields)
+                    if compact_outputs:
+                        tool_result = self._compact_tool_output(call['name'], tool_result)
+
+                    if memory:
+
+                        # --- Auto-query attraction details after recommend_attractions ---
+                        auto_detail_lines = self._auto_query_attraction_details(call['name'], memory)
 
                         # --- Auto-attach route info (Option C) ---
                         # After restaurants or attraction details, auto-query routes
                         # between known locations so the model gets travel times for free
                         auto_route_lines = self._auto_query_routes(call['name'], call['arguments'], memory)
 
-                        # Replace raw output with: acknowledgment + auto-routes + full memory snapshot
+                        # Replace raw output with: acknowledgment + auto-details + auto-routes + full memory snapshot
                         tool_content = processed
+                        if auto_detail_lines:
+                            tool_content += "\n\n" + auto_detail_lines
                         if auto_route_lines:
                             tool_content += "\n\n" + auto_route_lines
                         tool_content += "\n\n" + memory.render_snapshot()
@@ -535,17 +788,36 @@ class ToolsFnAgent:
                     })
                 continue
 
-            # No tool calls → Return final answer
+            # No tool calls → try to extract plan
             final_content = self._extract_plan_content(msg.content or '')
+            if final_content:
+                token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
+                return final_content, messages, token_usage, memory
+
+            # Empty plan — nudge the model to output in correct format (max 2 retries)
+            empty_plan_retries += 1
+            if empty_plan_retries <= 2 and llm_budget > 0:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your response did not contain a travel plan in <plan>...</plan> tags. "
+                        "Please output your complete travel plan now, enclosed in <plan>...</plan> tags."
+                    ),
+                })
+                continue
+
+            # Exhausted retries — return empty
             token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
-            return final_content, messages, token_usage
+            return "", messages, token_usage, memory
 
         token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
-        return "Reached max LLM calls without final answer.", messages, token_usage
+        return "Reached max LLM calls without final answer.", messages, token_usage, memory
 
     def continue_run(self,
                      messages: List[Any],
-                     max_llm_calls: int = 20) -> Tuple[str, List[Any], Dict[str, int]]:
+                     max_llm_calls: int = 20,
+                     compact_outputs: bool = False,
+                     memory=None) -> Tuple[str, List[Any], Dict[str, int]]:
         """
         Continue agent loop from existing message history.
         Used for correction rounds after validation.
@@ -553,6 +825,8 @@ class ToolsFnAgent:
         Args:
             messages: Existing message history (will be mutated in-place)
             max_llm_calls: Maximum additional LLM calls
+            compact_outputs: If True, strip coordinates from tool outputs
+            memory: Optional WorkingMemory instance for assemble_day support
 
         Returns:
             (final_plan, messages, token_usage): Same as run()
@@ -561,12 +835,21 @@ class ToolsFnAgent:
         total_completion_tokens = 0
         total_tokens = 0
 
+        # Include assemble_day tool when memory is available
+        tools_for_llm = self.openai_tools
+        if memory is not None:
+            tools_for_llm = self.openai_tools + [ASSEMBLE_DAY_SCHEMA]
+
         llm_budget = max_llm_calls
 
         while llm_budget > 0:
             llm_budget -= 1
 
-            resp = self._call_llm(messages=messages, tools=self.openai_tools)
+            # Compress reasoning in older assistant messages to free context
+            if compact_outputs:
+                self._compress_previous_msgs(messages)
+
+            resp = self._call_llm(messages=messages, tools=tools_for_llm)
 
             usage = getattr(resp, 'usage', None)
             if usage:
@@ -579,7 +862,24 @@ class ToolsFnAgent:
             messages.append(msg)
             if calls:
                 for call in calls:
+                    # Handle assemble_day via memory (same as run())
+                    if call['name'] == 'assemble_day' and memory:
+                        try:
+                            args = json.loads(call['arguments']) if call['arguments'] else {}
+                        except json.JSONDecodeError:
+                            args = {}
+                        tool_content = memory.assemble_day(args)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call['id'],
+                            "name": call['name'],
+                            "content": tool_content,
+                        })
+                        continue
+
                     tool_result = self._exec_tool(call['name'], call['arguments'])
+                    if compact_outputs:
+                        tool_result = self._compact_tool_output(call['name'], tool_result)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call['id'],
@@ -659,7 +959,7 @@ def run_agent_inference(
     (output_dir / 'trajectories').mkdir(exist_ok=True)
     (output_dir / 'reports').mkdir(exist_ok=True)
     
-    if prompt_variant in ('guided', 'guided_memory'):
+    if prompt_variant in ('guided', 'guided_memory', 'harness_v1'):
         try:
             from prompts_guided import get_system_prompt
         except ImportError:
@@ -676,14 +976,16 @@ def run_agent_inference(
             from agent.prompts import get_system_prompt
 
     # Import validator for guided variants
-    if prompt_variant in ('guided', 'guided_memory'):
+    if prompt_variant in ('guided', 'guided_memory', 'harness_v1'):
         try:
             from plan_validator import validate_plan, build_correction_message
         except ImportError:
             from agent.plan_validator import validate_plan, build_correction_message
 
-    # Enable working memory for guided_memory variant
-    enable_memory = (prompt_variant == 'guided_memory')
+    # Enable working memory for guided_memory and harness_v1 variants
+    enable_memory = (prompt_variant in ('guided_memory', 'harness_v1'))
+    # Enable compact outputs for harness_v1 (strip coords from tool outputs)
+    compact_outputs = (prompt_variant == 'harness_v1')
     
     print_lock = Lock()
     results = []
@@ -701,21 +1003,23 @@ def run_agent_inference(
                 model=model,
                 sample_id=sample_id_raw,
                 database_base_path=database_dir,
+                tool_schema_path=str(tool_schema_path),
                 language=language
             )
             
             system_prompt = get_system_prompt(language)
             start_time = time.time()
 
-            final_plan, full_messages, token_usage = agent.run(
+            final_plan, full_messages, token_usage, memory = agent.run(
                 user_query=query,
                 system_prompt=system_prompt,
                 max_llm_calls=max_llm_calls,
                 enable_memory=enable_memory,
+                compact_outputs=compact_outputs,
             )
 
             # Validation loop for guided variants (max 2 correction rounds)
-            if prompt_variant in ('guided', 'guided_memory') and final_plan and final_plan != "Reached max LLM calls without final answer.":
+            if prompt_variant in ('guided', 'guided_memory', 'harness_v1') and final_plan and final_plan != "Reached max LLM calls without final answer.":
                 max_corrections = 2
                 for correction_round in range(max_corrections):
                     serialized_for_validation = agent._serialize_messages(full_messages)
@@ -737,6 +1041,8 @@ def run_agent_inference(
                     corrected_plan, full_messages, extra_usage = agent.continue_run(
                         messages=full_messages,
                         max_llm_calls=max(20, max_llm_calls // 4),
+                        compact_outputs=compact_outputs,
+                        memory=memory,
                     )
 
                     # Accumulate token usage
@@ -746,6 +1052,10 @@ def run_agent_inference(
 
                     if corrected_plan and corrected_plan != "Reached max LLM calls without final answer.":
                         final_plan = corrected_plan
+
+            # Auto-correct travel_city durations using working memory routes
+            if memory is not None and final_plan:
+                final_plan = memory.autocorrect_travel_city(final_plan)
 
             elapsed = time.time() - start_time
 
@@ -784,6 +1094,13 @@ def run_agent_inference(
                                 print(f"   Message attrs: {list(msg.__dict__.keys())}")
                 raise
             
+            # Save working memory snapshot if available
+            if memory is not None:
+                (output_dir / 'memory_snapshots').mkdir(exist_ok=True)
+                memory_file = output_dir / 'memory_snapshots' / f'{sample_id}.txt'
+                with open(memory_file, 'w', encoding='utf-8') as f:
+                    f.write(memory.render_snapshot())
+
             if final_plan:
                 plan_file = output_dir / 'reports' / f'{sample_id}.txt'
                 with open(plan_file, 'w', encoding='utf-8') as f:

@@ -42,11 +42,66 @@ Before generating your plan, ensure you have gathered sufficient data. A good st
 2. Query hotels for every destination city.
 3. Use recommend_attractions to discover options, then query_attraction_details for each one you might use (to get opening hours, visit duration, ticket prices).
 4. Use recommend_restaurants(near="Place Name") to find restaurants near your planned locations.
-5. Travel times between locations are AUTO-COMPUTED and shown in the ROUTES section of Working Memory. Use exact values from ROUTES for travel_city activities.
+5. Travel times between locations are AUTO-COMPUTED and shown in the ROUTES section of Working Memory.
 
 Tip: Use parallel tool calls aggressively — you can query flights, trains, hotels, and attractions all in one turn.
 
-AUTOMATIC VALIDATION: After you generate your plan, it will be automatically checked against your tool query results. Any hotel, restaurant, attraction, flight, or train in your plan that does NOT exactly match a tool result will be flagged as invalid. Query everything you plan to use.
+================================================================
+PLAN ASSEMBLY (CRITICAL — READ CAREFULLY)
+================================================================
+Do NOT write day plans manually. Instead, use the `assemble_day` tool for EACH day.
+You specify the sequence of activities; the tool computes all timestamps, travel times,
+distances, and costs deterministically. This guarantees correct travel durations and
+prevents time conflicts.
+
+**Workflow:**
+1. Gather all data (Phase 1 — query tools as above).
+2. For each day, call `assemble_day` with the ordered activity list.
+   - The tool auto-inserts travel_city segments between locations.
+   - It validates business hours, attraction hours, and visit durations.
+   - If there are errors, fix them (e.g., swap restaurant, reorder) and call again.
+3. After all days are assembled successfully, output the final plan in <plan> tags:
+   - Copy the assembled day outputs verbatim (do NOT modify timestamps or durations).
+   - Append a **Budget Summary** section at the end.
+
+**Activity types for assemble_day:**
+- intercity: {type:"intercity", transport_type:"train"/"flight", id:"G7798"}
+- buffer: {type:"buffer", description:"Deplaning, baggage claim", duration_min:40}
+- hotel: {type:"hotel", action:"Check-in"/"Check-out"/"Rest", duration_min:50}
+- attraction: {type:"attraction", name:"The Palace Museum"}
+- meal: {type:"meal", meal_type:"Lunch"/"Dinner", restaurant:"Restaurant Name", duration_min:60}
+
+**Key rules:**
+- Use exact entity names from Working Memory (hotels, restaurants, attractions).
+- Start each day with the intercity arrival or hotel departure, end with hotel Rest (except final day).
+- On arrival days: buffer after intercity, then hotel Check-in, then activities.
+- On departure days: activities, then travel to station, buffer, then intercity.
+- Full sightseeing days: at least 2 attractions + lunch + dinner.
+- Restaurants tagged [dinner only] cannot be used for Lunch. Check the tag in Working Memory.
+- If assemble_day returns errors, address them before proceeding.
+
+================================================================
+COMMONSENSE RULES (YOUR PLAN WILL BE CHECKED AGAINST THESE)
+================================================================
+**Last day accommodation**: On the final day (returning to origin), set `Accommodation: -` (the traveler does not stay overnight). Do NOT write the hotel name on the departure day.
+
+**Meal scheduling rules** (per day):
+  - Full sightseeing day (no intercity travel): MUST have lunch AND dinner, gap >= 2 hours between end of lunch and start of dinner.
+  - Arrival day: arrive before 10:00 → 2 meals; arrive 10:00-15:00 → at least 1 meal; arrive after 15:00 → 0 or 1 meal.
+  - Departure day: depart before 9:00 → 0 meals; depart 9:00-15:00 → at most 1 meal (lunch); depart after 15:00 → at least 1 meal.
+  - ALL meals must fall within the restaurant's opening_time-closing_time. Check hours in Working Memory before scheduling.
+
+**Attraction density rules** (per day):
+  - Full sightseeing day: at least 2 attractions OR total attraction-related time (including travel to/from) >= 4 hours.
+  - Arrival day arriving before 12:00: at least 1 attraction.
+  - Departure day departing after 16:00: at least 1 attraction.
+
+**Travel continuity**:
+  - A `travel_city` segment MUST appear between every pair of consecutive activities at different locations (even short distances).
+  - `current_city` headers must chain correctly: Day N's destination = Day N+1's origin.
+  - Do NOT fabricate travel times. Use only values from Working Memory ROUTES section or assemble_day output.
+
+AUTOMATIC VALIDATION: After you generate your plan, it will be automatically checked against your tool query results. Any entity not exactly matching will be flagged as invalid.
 
 """
 

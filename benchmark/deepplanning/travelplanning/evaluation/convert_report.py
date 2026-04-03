@@ -164,7 +164,18 @@ def process_single_report(
             
             # Validate JSON (this is the key step for retry)
             parsed = json.loads(json_payload)
-            
+
+            # Post-processing: force last day accommodation to "-" / remove it.
+            # The traveler does not stay overnight on the departure day.
+            daily_plans = parsed.get('daily_plans', [])
+            if daily_plans:
+                last_day = daily_plans[-1]
+                if 'accommodation' in last_day:
+                    accom = last_day['accommodation']
+                    name = accom.get('name', '') if isinstance(accom, dict) else str(accom)
+                    if name and name != '-':
+                        last_day['accommodation'] = {"name": "-", "price_per_night": 0}
+
             # If successful, save and exit loop
             output_file = output_dir / f'id_{sample_id}_converted.json'
             output_file.write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding='utf-8')

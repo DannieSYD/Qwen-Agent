@@ -150,8 +150,8 @@ def parse_args():
     
     # Prompt variant
     parser.add_argument('--prompt-variant', type=str, default='default',
-                       choices=['default', 'explore', 'guided', 'guided_memory'],
-                       help='Prompt variant to use (default: original, explore: explore-first, guided: light guidance + validator, guided_memory: guided + working memory)')
+                       choices=['default', 'explore', 'guided', 'guided_memory', 'harness_v1'],
+                       help='Prompt variant to use (default: original, explore: explore-first, guided: light guidance + validator, guided_memory: guided + working memory, harness_v1: guided + working memory + compacted tool schema)')
 
     # Advanced options
     parser.add_argument('--verbose', action='store_true',
@@ -197,8 +197,11 @@ def setup_paths(args):
     # Database path - language specific
     args.database_dir = base_dir / 'database' / f'database_{args.language}'
     
-    # Tool schema path
-    args.tool_schema_path = base_dir / 'tools' / f'tool_schema_{args.language}.json'
+    # Tool schema path — harness_v1 uses compacted schema (name-only, no coordinates)
+    if prompt_variant == 'harness_v1':
+        args.tool_schema_path = base_dir / 'tools' / f'tool_schema_harness_v1_{args.language}.json'
+    else:
+        args.tool_schema_path = base_dir / 'tools' / f'tool_schema_{args.language}.json'
     
     return args
 
