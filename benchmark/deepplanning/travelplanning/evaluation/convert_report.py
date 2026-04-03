@@ -141,7 +141,7 @@ def process_single_report(
             resp = client.chat.completions.create(
                 model=model_name,
                 messages=messages,
-                max_tokens=10240
+                max_completion_tokens=10240
             )
             
             content = resp.choices[0].message.content or ""
@@ -234,7 +234,7 @@ def convert_reports(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Always use qwen-plus for conversion
-    conversion_model = 'qwen-plus'
+    conversion_model = 'gpt-5.2-2025-12-11-high'
     
     # Load model config and create client
     model_config = load_model_config(conversion_model)

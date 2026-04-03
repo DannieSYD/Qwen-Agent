@@ -24,19 +24,43 @@
     "gpt-4o-2024-11-20": {
       "model_name": "gpt-4o-2024-11-20",
       "model_type": "openai",
-      "base_url": "https://api.openai.com/v1/models",
+      "base_url": "https://api.openai.com/v1",
       "api_key_env": "OPENAI_API_KEY",
       "temperature": 0.0
     },
-    "gpt-5-2025-08-07-high": {
-      "model_name": "gpt-5-2025-08-07",
+    "gpt-5.2-2025-12-11-high": {
+      "model_name": "gpt-5.2-2025-12-11",
       "model_type": "openai",
-      "base_url": "https://api.openai.com/v1/models",
+      "base_url": "https://api.openai.com/v1",
       "api_key_env": "OPENAI_API_KEY",
       "temperature": 0.0,
       "extra_body": {
         "reasoning_effort": "high"
       }
+    },
+    "gpt-5.2-2025-12-11": {
+      "model_name": "gpt-5.2-2025-12-11",
+      "model_type": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "temperature": 0.0
+    },
+    "gpt-5.4-2026-03-05-high": {
+      "model_name": "gpt-5.4-2026-03-05",
+      "model_type": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "temperature": 0.0,
+      "extra_body": {
+        "reasoning_effort": "high"
+      }
+    },
+    "gpt-5.4": {
+      "model_name": "gpt-5.4",
+      "model_type": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "temperature": 0.0
     }
   }
 }

@@ -5,10 +5,14 @@ Supports multiple providers: OpenAI, Anthropic (Claude), Google (Gemini), etc.
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 import openai
+from openai.types.chat import ChatCompletion, ChatCompletionMessage
+from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
 
 
 def load_model_config(model_name: str) -> Dict[str, Any]:
@@ -132,45 +136,165 @@ def call_llm(
     
     # Detect reasoning models (don't support temperature)
     is_reasoning_model = any(x in actual_model_name.lower() for x in ['o1', 'o3', 'o4-mini', 'reasoner'])
-    
+
+    # Determine if we need the Responses API:
+    # Some models (e.g. gpt-5.4) don't support reasoning_effort + tools on /v1/chat/completions
+    reasoning_effort = extra_body.get('reasoning_effort') if extra_body else None
+    use_responses_api = bool(reasoning_effort and tools)
+
     last_err = None
-    
+
     for attempt in range(max_retries):
         try:
-            params = {
-                "model": actual_model_name,
-                "messages": messages,
-            }
-            
-            if tools:
-                params["tools"] = tools
-            
-            if not is_reasoning_model and temperature:
-                params["temperature"] = temperature
-            
-            if extra_body:
-                params["extra_body"] = extra_body
-            response = client.chat.completions.create(**params)
-            
+            if use_responses_api:
+                response = _call_responses_api(
+                    client, actual_model_name, messages, tools,
+                    reasoning_effort,
+                )
+            else:
+                params = {
+                    "model": actual_model_name,
+                    "messages": messages,
+                }
+
+                if tools:
+                    params["tools"] = tools
+
+                if not is_reasoning_model and not reasoning_effort and temperature:
+                    params["temperature"] = temperature
+
+                if extra_body:
+                    params["extra_body"] = extra_body
+                response = client.chat.completions.create(**params)
+
             # Validate response
             msg = response.choices[0].message
             has_content = msg.content and msg.content.strip()
             has_tool_calls = hasattr(msg, 'tool_calls') and msg.tool_calls
-            
+
             if not has_content and not has_tool_calls:
                 raise ValueError("Model returned an empty response without tool calls")
-            
+
             return response
-            
+
         except Exception as e:
             last_err = e
-            
+
             if attempt == max_retries - 1:
                 raise
-            
+
             wait_time = backoff
             print(f"  ⚠️  LLM API error (attempt {attempt + 1}/{max_retries}): {e}")
             print(f"     Retrying in {wait_time:.1f}s...")
             time.sleep(wait_time)
-    
+
     raise last_err if last_err else RuntimeError("LLM API call failed")
+
+
+def _call_responses_api(client, model, messages, tools, reasoning_effort):
+    """
+    Call OpenAI Responses API and convert result to ChatCompletion format
+    so the rest of the codebase doesn't need changes.
+    """
+    # Build tools in responses API format (same schema, wrapped with type)
+    resp_tools = []
+    for t in tools:
+        resp_tools.append({
+            "type": "function",
+            "name": t["function"]["name"],
+            "description": t["function"].get("description", ""),
+            "parameters": t["function"].get("parameters", {}),
+        })
+
+    # Convert chat completions messages to Responses API input format.
+    # Key differences:
+    #   assistant + tool_calls → separate {"type": "function_call", ...} items
+    #   {"role": "tool", ...}  → {"type": "function_call_output", ...}
+    resp_input = []
+    for m in messages:
+        # Normalize to dict
+        if not isinstance(m, dict):
+            md = {"role": getattr(m, 'role', 'assistant'),
+                  "content": m.content}
+            if hasattr(m, 'tool_calls') and m.tool_calls:
+                md["tool_calls"] = [
+                    {"id": tc.id, "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in m.tool_calls
+                ]
+            m = md
+
+        role = m.get("role")
+
+        if role == "tool":
+            # Tool result → function_call_output
+            resp_input.append({
+                "type": "function_call_output",
+                "call_id": m["tool_call_id"],
+                "output": m.get("content") or "",
+            })
+        elif role == "assistant":
+            # If assistant has text content, emit as a message
+            if m.get("content"):
+                resp_input.append({"role": "assistant", "content": m["content"]})
+            # Each tool call becomes a separate function_call item
+            for tc in (m.get("tool_calls") or []):
+                func = tc.get("function", {}) if isinstance(tc, dict) else tc.function
+                tc_id = tc.get("id") if isinstance(tc, dict) else tc.id
+                func_name = func.get("name") if isinstance(func, dict) else func.name
+                func_args = func.get("arguments") if isinstance(func, dict) else func.arguments
+                resp_input.append({
+                    "type": "function_call",
+                    "call_id": tc_id,
+                    "name": func_name,
+                    "arguments": func_args,
+                })
+        else:
+            # system / user messages pass through
+            entry = dict(m)
+            if entry.get("content") is None:
+                entry["content"] = ""
+            resp_input.append(entry)
+
+    params = {
+        "model": model,
+        "input": resp_input,
+        "tools": resp_tools,
+        "reasoning": {"effort": reasoning_effort},
+    }
+    resp = client.responses.create(**params)
+
+    # Convert responses API output to ChatCompletion format
+    content_parts = []
+    tool_calls = []
+    for item in resp.output:
+        if item.type == "message":
+            for c in item.content:
+                if hasattr(c, 'text'):
+                    content_parts.append(c.text)
+        elif item.type == "function_call":
+            tool_calls.append(ChatCompletionMessageToolCall(
+                id=item.call_id,
+                type="function",
+                function=Function(
+                    name=item.name,
+                    arguments=item.arguments,
+                ),
+            ))
+
+    content_text = "\n".join(content_parts) if content_parts else None
+
+    message = ChatCompletionMessage(
+        role="assistant",
+        content=content_text,
+        tool_calls=tool_calls if tool_calls else None,
+    )
+
+    choice = Choice(index=0, message=message, finish_reason="stop")
+
+    return ChatCompletion(
+        id=resp.id or f"resp-{uuid.uuid4().hex[:12]}",
+        object="chat.completion",
+        created=int(time.time()),
+        model=model,
+        choices=[choice],
+    )
