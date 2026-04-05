@@ -126,7 +126,7 @@ pip install -r requirements.txt
 # Pre-command
 source ~/.bashrc
 conda activate deepplanning
-cd /data1/projects/Qwen-Agent/benchmark/deepplanning
+cd /data1/dannie/projects/Qwen-Agent/benchmark/deepplanning # this is necessary, since .bashrc has cd in it.
 
 # Database extraction (required before first run)
 cd shoppingplanning/database_zip && tar -xzf database_level1.tar.gz -C .. && tar -xzf database_level2.tar.gz -C .. && tar -xzf database_level3.tar.gz -C .. && cd ../..

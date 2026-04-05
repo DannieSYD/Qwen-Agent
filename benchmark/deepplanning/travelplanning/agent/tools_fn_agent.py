@@ -18,6 +18,26 @@ except ImportError:
     from call_llm import call_llm
 
 
+def _load_dotenv_for_module() -> None:
+    """Load .env file so API keys are available before agent instantiation."""
+    try:
+        domain_root = Path(__file__).resolve().parent.parent
+        project_root = domain_root.parent
+        dotenv_path = project_root / '.env' if (project_root / '.env').exists() else domain_root / '.env'
+        if not dotenv_path.exists():
+            return
+        for line in dotenv_path.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, val = line.split('=', 1)
+            key, val = key.strip(), val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+    except Exception:
+        pass
+
+
 ASSEMBLE_DAY_SCHEMA = {
     "type": "function",
     "function": {
@@ -666,7 +686,8 @@ class ToolsFnAgent:
             system_prompt: Optional[str] = None,
             max_llm_calls: int = 100,
             enable_memory: bool = False,
-            compact_outputs: bool = False) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
+            compact_outputs: bool = False,
+            extracted_constraints: Optional[tuple] = None) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """
         Agent main loop: Call LLM → Execute tools → Repeat until final answer
 
@@ -678,6 +699,9 @@ class ToolsFnAgent:
                            with structured summaries + accumulated memory snapshot
             compact_outputs: If True, strip coordinates and non-essential fields from
                            tool outputs before passing to the model (harness_v1)
+            extracted_constraints: Optional (trip_meta, constraints, rendered_str) tuple
+                           from Phase 1 constraint extraction. If provided, stored in
+                           working memory and rendered in the memory snapshot.
 
         Returns:
             (final_plan, messages, token_usage): Final plan, complete message history, and token usage
@@ -690,6 +714,11 @@ class ToolsFnAgent:
             except ImportError:
                 from agent.working_memory import WorkingMemory
             memory = WorkingMemory(language=self.language)
+
+            # Phase 1: Store extracted constraints in working memory
+            if extracted_constraints is not None:
+                trip_meta, constraints, rendered = extracted_constraints
+                memory.set_constraints(trip_meta, constraints, rendered)
 
         # When memory is enabled, add the assemble_day tool so the model can
         # build day plans with deterministic timestamps from working memory.
@@ -958,8 +987,11 @@ def run_agent_inference(
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / 'trajectories').mkdir(exist_ok=True)
     (output_dir / 'reports').mkdir(exist_ok=True)
-    
-    if prompt_variant in ('guided', 'guided_memory', 'harness_v1'):
+
+    # Load .env early so API keys are available for constraint extraction
+    _load_dotenv_for_module()
+
+    if prompt_variant in ('guided', 'guided_memory', 'harness_v1', 'harness_v2'):
         try:
             from prompts_guided import get_system_prompt
         except ImportError:
@@ -976,16 +1008,24 @@ def run_agent_inference(
             from agent.prompts import get_system_prompt
 
     # Import validator for guided variants
-    if prompt_variant in ('guided', 'guided_memory', 'harness_v1'):
+    if prompt_variant in ('guided', 'guided_memory', 'harness_v1', 'harness_v2'):
         try:
             from plan_validator import validate_plan, build_correction_message
         except ImportError:
             from agent.plan_validator import validate_plan, build_correction_message
 
-    # Enable working memory for guided_memory and harness_v1 variants
-    enable_memory = (prompt_variant in ('guided_memory', 'harness_v1'))
-    # Enable compact outputs for harness_v1 (strip coords from tool outputs)
-    compact_outputs = (prompt_variant == 'harness_v1')
+    # Phase 1: Import constraint extractor for harness_v2
+    enable_constraint_extraction = (prompt_variant == 'harness_v2')
+    if enable_constraint_extraction:
+        try:
+            from constraint_extractor import extract_constraints, render_constraints_for_prompt
+        except ImportError:
+            from agent.constraint_extractor import extract_constraints, render_constraints_for_prompt
+
+    # Enable working memory for guided_memory, harness_v1, and harness_v2 variants
+    enable_memory = (prompt_variant in ('guided_memory', 'harness_v1', 'harness_v2'))
+    # Enable compact outputs for harness_v1 and harness_v2
+    compact_outputs = (prompt_variant in ('harness_v1', 'harness_v2'))
     
     print_lock = Lock()
     results = []
@@ -1010,16 +1050,30 @@ def run_agent_inference(
             system_prompt = get_system_prompt(language)
             start_time = time.time()
 
+            # Phase 1: Extract constraints before running agent
+            extracted_constraints = None
+            if enable_constraint_extraction:
+                try:
+                    trip_meta, constraints = extract_constraints(query, model)
+                    rendered = render_constraints_for_prompt(trip_meta, constraints)
+                    extracted_constraints = (trip_meta, constraints, rendered)
+                    with print_lock:
+                        print(f"  📋 {sample_id}: Extracted {len(constraints)} constraints")
+                except Exception as e:
+                    with print_lock:
+                        print(f"  ⚠️  {sample_id}: Constraint extraction failed: {e}")
+
             final_plan, full_messages, token_usage, memory = agent.run(
                 user_query=query,
                 system_prompt=system_prompt,
                 max_llm_calls=max_llm_calls,
                 enable_memory=enable_memory,
                 compact_outputs=compact_outputs,
+                extracted_constraints=extracted_constraints,
             )
 
             # Validation loop for guided variants (max 2 correction rounds)
-            if prompt_variant in ('guided', 'guided_memory', 'harness_v1') and final_plan and final_plan != "Reached max LLM calls without final answer.":
+            if prompt_variant in ('guided', 'guided_memory', 'harness_v1', 'harness_v2') and final_plan and final_plan != "Reached max LLM calls without final answer.":
                 max_corrections = 2
                 for correction_round in range(max_corrections):
                     serialized_for_validation = agent._serialize_messages(full_messages)

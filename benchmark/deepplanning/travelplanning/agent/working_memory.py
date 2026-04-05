@@ -35,6 +35,17 @@ class WorkingMemory:
         # Track which queries have been made
         self.queries_made: List[str] = []
 
+        # Phase 1: Extracted constraints and trip metadata
+        self.trip_meta = None            # TripMeta instance (set by constraint_extractor)
+        self.constraints: List[Any] = [] # List[ConstraintTuple] (set by constraint_extractor)
+        self._constraints_rendered: str = ""  # Pre-rendered constraint block
+
+    def set_constraints(self, trip_meta, constraints, rendered: str = "") -> None:
+        """Store extracted constraints and optional pre-rendered text."""
+        self.trip_meta = trip_meta
+        self.constraints = constraints
+        self._constraints_rendered = rendered
+
     def process_tool_result(self, tool_name: str, arguments: str, result: str) -> str:
         """
         Parse a tool result and update memory. Returns acknowledgment string.
@@ -744,6 +755,10 @@ class WorkingMemory:
         # Routes — render as compact distance matrix
         if self.routes:
             sections.append(self._render_routes_matrix())
+
+        # Constraints (Phase 1) — show at top if available
+        if self._constraints_rendered:
+            sections.insert(0, self._constraints_rendered)
 
         if not sections:
             return "═══ WORKING MEMORY: Empty (no data collected yet) ═══"

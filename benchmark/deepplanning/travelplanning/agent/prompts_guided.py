@@ -34,19 +34,6 @@ except ImportError:
 _GUIDANCE_EN = """
 
 ================================================================
-PLANNING STRATEGY (IMPORTANT)
-================================================================
-Before generating your plan, ensure you have gathered sufficient data. A good strategy:
-
-1. Query intercity transport (flights AND trains) for EVERY segment, including the return trip.
-2. Query hotels for every destination city.
-3. Use recommend_attractions to discover options, then query_attraction_details for each one you might use (to get opening hours, visit duration, ticket prices).
-4. Use recommend_restaurants(near="Place Name") to find restaurants near your planned locations.
-5. Travel times between locations are AUTO-COMPUTED and shown in the ROUTES section of Working Memory.
-
-Tip: Use parallel tool calls aggressively — you can query flights, trains, hotels, and attractions all in one turn.
-
-================================================================
 PLAN ASSEMBLY (CRITICAL — READ CAREFULLY)
 ================================================================
 Do NOT write day plans manually. Instead, use the `assemble_day` tool for EACH day.
