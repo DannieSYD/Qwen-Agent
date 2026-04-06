@@ -1,9 +1,11 @@
 """
-Sandboxed executor for LLM-generated OR-Tools solver code.
+Solver executor — two modes:
 
-Runs the code in a subprocess with a timeout. The `data` dict (exported
-from WorkingMemory) is serialized to JSON and passed via stdin, then
-deserialized inside the subprocess before executing the LLM's code.
+1. run_solver_template (v4): Fixed CP-SAT template + greedy scheduler.
+   No LLM-generated code. Reads constraints + data, solves, returns plan.
+
+2. run_solver_code (v3, legacy): Sandboxed execution of LLM-generated code.
+   Kept for backward compatibility.
 """
 
 import json
@@ -294,3 +296,62 @@ def run_solver_code(
             Path(code_file.name).unlink(missing_ok=True)
         except Exception:
             pass
+
+
+# ======================================================================
+# v4: Fixed CP-SAT template (no LLM code)
+# ======================================================================
+
+def run_solver_template(
+    data: Dict[str, Any],
+    memory,
+    timeout: float = 60.0,
+) -> str:
+    """
+    Run the parameterized CP-SAT template on working memory data.
+
+    No LLM-generated code. The template reads constraints from data["constraints"]
+    and compiles them generically into a CP-SAT model.
+
+    Args:
+        data: Working memory data dict (from export_memory_as_dict)
+        memory: WorkingMemory instance (needed for assemble_day in scheduling)
+        timeout: Max execution time (not enforced here since no subprocess)
+
+    Returns:
+        Plan text on success, or prefixed feedback message on failure:
+        - "SOLVER_FEEDBACK: ..." — missing data, LLM should query more
+        - "SOLVER_INFEASIBLE: ..." — constraints conflict
+        - "SOLVER_ERROR: ..." — internal error
+    """
+    try:
+        from solver.cp_template import CPSATEntitySelector
+        from solver.scheduler import GreedyScheduler
+    except ImportError:
+        from .cp_template import CPSATEntitySelector
+        from .scheduler import GreedyScheduler
+
+    # Phase 1: CP-SAT entity selection
+    selector = CPSATEntitySelector(data)
+    result = selector.solve()
+
+    if result.status == "MISSING_DATA":
+        return result.feedback
+
+    if result.status == "INFEASIBLE":
+        return result.feedback
+
+    if result.status == "ERROR":
+        return f"SOLVER_ERROR: {result.feedback}"
+
+    # Phase 2: Greedy scheduling
+    scheduler = GreedyScheduler(data, result, memory)
+    plan_text, sched_feedback = scheduler.schedule()
+
+    if not plan_text:
+        return sched_feedback or "SOLVER_ERROR: Scheduler produced no output."
+
+    if sched_feedback:
+        return plan_text + "\n\n" + sched_feedback
+
+    return plan_text

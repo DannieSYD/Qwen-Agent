@@ -79,7 +79,8 @@ def _data_summary_for_model(solver_data: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-RUN_SOLVER_SCHEMA = {
+# v3 schema (legacy): LLM writes solver code
+RUN_SOLVER_SCHEMA_V3 = {
     "type": "function",
     "function": {
         "name": "run_solver",
@@ -104,6 +105,27 @@ RUN_SOLVER_SCHEMA = {
                 }
             },
             "required": ["code"]
+        }
+    }
+}
+
+# v4 schema: fixed CP-SAT template, no LLM code
+RUN_SOLVER_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "run_solver",
+        "description": (
+            "Run the CP-SAT optimizer to build a travel plan. Automatically reads "
+            "all Working Memory data (transport, hotels, attractions, restaurants, "
+            "routes) and extracted constraints. Selects optimal entities via "
+            "constraint satisfaction, then schedules them into days. No arguments "
+            "needed — just call this when you have gathered enough data. If it "
+            "returns feedback about missing data, query that data and call again."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
         }
     }
 }
@@ -802,7 +824,8 @@ class ToolsFnAgent:
             enable_memory: bool = False,
             compact_outputs: bool = False,
             extracted_constraints: Optional[tuple] = None,
-            enable_solver: bool = False) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
+            enable_solver: bool = False,
+            solver_version: str = 'v3') -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """
         Agent main loop: Call LLM → Execute tools → Repeat until final answer
 
@@ -817,7 +840,8 @@ class ToolsFnAgent:
             extracted_constraints: Optional (trip_meta, constraints, rendered_str) tuple
                            from Phase 1 constraint extraction. If provided, stored in
                            working memory and rendered in the memory snapshot.
-            enable_solver: If True, add run_solver tool for LLM-generated OR-Tools code
+            enable_solver: If True, add run_solver tool
+            solver_version: 'v3' (LLM writes code) or 'v4' (fixed CP-SAT template)
 
         Returns:
             (final_plan, messages, token_usage): Final plan, complete message history, and token usage
@@ -838,12 +862,13 @@ class ToolsFnAgent:
 
         # When memory is enabled, add the assemble_day tool so the model can
         # build day plans with deterministic timestamps from working memory.
-        # When solver is enabled, also add run_solver for LLM-generated CP-SAT code.
+        # When solver is enabled, also add run_solver tool.
         tools_for_llm = self.openai_tools
         if enable_memory:
             extra_tools = [ASSEMBLE_DAY_SCHEMA]
             if enable_solver:
-                extra_tools.append(RUN_SOLVER_SCHEMA)
+                schema = RUN_SOLVER_SCHEMA if solver_version == 'v4' else RUN_SOLVER_SCHEMA_V3
+                extra_tools.append(schema)
             tools_for_llm = self.openai_tools + extra_tools
 
         messages: List[Dict[str, Any]] = []
@@ -904,25 +929,35 @@ class ToolsFnAgent:
                         })
                         continue
 
-                    # --- Special handling: run_solver executes LLM-generated code ---
+                    # --- Special handling: run_solver ---
                     if call['name'] == 'run_solver' and memory:
                         solver_was_called = True
                         try:
-                            args = json.loads(call['arguments']) if call['arguments'] else {}
-                        except json.JSONDecodeError:
-                            args = {}
-                        try:
-                            from solver.executor import run_solver_code
                             from solver.data_export import export_memory_as_dict
-                            solver_data = export_memory_as_dict(memory)
-                            tool_content = run_solver_code(
-                                code=args.get('code', ''),
-                                data=solver_data,
-                            )
                         except ImportError:
-                            from agent.solver.executor import run_solver_code
                             from agent.solver.data_export import export_memory_as_dict
-                            solver_data = export_memory_as_dict(memory)
+                        solver_data = export_memory_as_dict(memory)
+
+                        if solver_version == 'v4':
+                            # v4: fixed CP-SAT template, no LLM code
+                            try:
+                                from solver.executor import run_solver_template
+                            except ImportError:
+                                from agent.solver.executor import run_solver_template
+                            tool_content = run_solver_template(
+                                data=solver_data,
+                                memory=memory,
+                            )
+                        else:
+                            # v3: LLM-generated code
+                            try:
+                                args = json.loads(call['arguments']) if call['arguments'] else {}
+                            except json.JSONDecodeError:
+                                args = {}
+                            try:
+                                from solver.executor import run_solver_code
+                            except ImportError:
+                                from agent.solver.executor import run_solver_code
                             tool_content = run_solver_code(
                                 code=args.get('code', ''),
                                 data=solver_data,
@@ -1124,19 +1159,18 @@ class ToolsFnAgent:
                     # Handle run_solver via solver executor (same as run())
                     if call['name'] == 'run_solver' and memory:
                         try:
-                            args = json.loads(call['arguments']) if call['arguments'] else {}
-                        except json.JSONDecodeError:
-                            args = {}
-                        try:
-                            from solver.executor import run_solver_code
                             from solver.data_export import export_memory_as_dict
                         except ImportError:
-                            from agent.solver.executor import run_solver_code
                             from agent.solver.data_export import export_memory_as_dict
                         solver_data = export_memory_as_dict(memory)
-                        tool_content = run_solver_code(
-                            code=args.get('code', ''),
+                        # Use v4 template in _finalize_plan context
+                        try:
+                            from solver.executor import run_solver_template
+                        except ImportError:
+                            from agent.solver.executor import run_solver_template
+                        tool_content = run_solver_template(
                             data=solver_data,
+                            memory=memory,
                         )
                         data_summary = _data_summary_for_model(solver_data)
                         # Auto-extract successful solver output as final plan
@@ -1242,7 +1276,9 @@ def run_agent_inference(
     # Load .env early so API keys are available for constraint extraction
     _load_dotenv_for_module()
 
-    if prompt_variant in ('guided', 'guided_memory', 'harness_v1', 'harness_v2', 'harness_v3'):
+    _GUIDED_VARIANTS = ('guided', 'guided_memory', 'harness_v1', 'harness_v2', 'harness_v3', 'harness_v4')
+
+    if prompt_variant in _GUIDED_VARIANTS:
         try:
             from prompts_guided import get_system_prompt
         except ImportError:
@@ -1259,26 +1295,28 @@ def run_agent_inference(
             from agent.prompts import get_system_prompt
 
     # Import validator for guided variants
-    if prompt_variant in ('guided', 'guided_memory', 'harness_v1', 'harness_v2', 'harness_v3'):
+    if prompt_variant in _GUIDED_VARIANTS:
         try:
             from plan_validator import validate_plan, build_correction_message
         except ImportError:
             from agent.plan_validator import validate_plan, build_correction_message
 
-    # Phase 1: Import constraint extractor for harness_v2 and harness_v3
-    enable_constraint_extraction = (prompt_variant in ('harness_v2', 'harness_v3'))
+    # Phase 1: Import constraint extractor for harness_v2+
+    enable_constraint_extraction = (prompt_variant in ('harness_v2', 'harness_v3', 'harness_v4'))
     if enable_constraint_extraction:
         try:
             from constraint_extractor import extract_constraints, render_constraints_for_prompt
         except ImportError:
             from agent.constraint_extractor import extract_constraints, render_constraints_for_prompt
 
-    # Enable working memory for guided_memory, harness_v1, harness_v2, harness_v3
-    enable_memory = (prompt_variant in ('guided_memory', 'harness_v1', 'harness_v2', 'harness_v3'))
+    # Enable working memory for guided_memory, harness_v1+
+    enable_memory = (prompt_variant in ('guided_memory', 'harness_v1', 'harness_v2', 'harness_v3', 'harness_v4'))
     # Enable compact outputs for harness_v1+
-    compact_outputs = (prompt_variant in ('harness_v1', 'harness_v2', 'harness_v3'))
-    # Enable solver tool for harness_v3
-    enable_solver = (prompt_variant == 'harness_v3')
+    compact_outputs = (prompt_variant in ('harness_v1', 'harness_v2', 'harness_v3', 'harness_v4'))
+    # Enable solver tool for harness_v3+
+    enable_solver = (prompt_variant in ('harness_v3', 'harness_v4'))
+    # Solver version: v3 = LLM writes code, v4 = fixed template
+    solver_version = 'v4' if prompt_variant == 'harness_v4' else 'v3'
     
     print_lock = Lock()
     results = []
@@ -1300,8 +1338,8 @@ def run_agent_inference(
                 language=language
             )
             
-            if prompt_variant == 'harness_v3':
-                system_prompt = get_system_prompt(language, variant='solver')
+            if prompt_variant in ('harness_v3', 'harness_v4'):
+                system_prompt = get_system_prompt(language, variant='solver' if prompt_variant == 'harness_v3' else 'solver_v4')
             else:
                 system_prompt = get_system_prompt(language)
             start_time = time.time()
@@ -1327,10 +1365,11 @@ def run_agent_inference(
                 compact_outputs=compact_outputs,
                 extracted_constraints=extracted_constraints,
                 enable_solver=enable_solver,
+                solver_version=solver_version,
             )
 
             # Validation loop for guided variants (max 2 correction rounds)
-            if prompt_variant in ('guided', 'guided_memory', 'harness_v1', 'harness_v2', 'harness_v3') and final_plan and final_plan != "Reached max LLM calls without final answer.":
+            if prompt_variant in _GUIDED_VARIANTS and final_plan and final_plan != "Reached max LLM calls without final answer.":
                 max_corrections = 2
                 for correction_round in range(max_corrections):
                     serialized_for_validation = agent._serialize_messages(full_messages)

@@ -209,6 +209,54 @@ Always read data from the pre-loaded `data` dict — do NOT hardcode values.
 _SOLVER_GUIDANCE_ZH = _SOLVER_GUIDANCE_EN  # Use English guidance for now
 
 
+# ============================================================================
+# v4: Simplified solver guidance (fixed template, no LLM code)
+# ============================================================================
+
+_SOLVER_V4_GUIDANCE_EN = """
+
+================================================================
+MANDATORY: USE run_solver TO BUILD YOUR PLAN
+================================================================
+After gathering enough data, call `run_solver` (NO arguments needed).
+The solver automatically:
+1. Reads all Working Memory data (transport, hotels, attractions, restaurants, routes)
+2. Reads all extracted constraints from Phase 1
+3. Uses CP-SAT optimization to select entities satisfying all constraints
+4. Schedules them into a feasible day-by-day plan
+
+**Workflow:**
+1. Gather ALL data first:
+   - Outbound transport: query flights/trains for departure date
+   - Inbound transport: query flights/trains for return date
+   - Hotels: query hotels in destination city
+   - Attractions: use recommend_attractions, then query_attraction_details for each
+   - Restaurants: use recommend_restaurants near planned locations
+   - Routes are computed automatically between known locations
+2. Call `run_solver` — no code, no arguments. Just call it.
+3. If SOLVER_FEEDBACK says data is missing:
+   - Query the missing data using the appropriate tool calls
+   - Call `run_solver` again (it re-reads Working Memory automatically)
+4. If SOLVER_INFEASIBLE:
+   - Read the feedback to understand which constraints conflict
+   - Query more options (e.g., more hotels, different transport) to expand choices
+   - Call `run_solver` again
+5. The solver output becomes the final plan automatically.
+
+**Tips for data gathering:**
+- Query transport in BOTH directions (outbound AND inbound)
+- After recommend_attractions, call query_attraction_details for each attraction
+- After querying hotels, use recommend_restaurants near attractions or near the hotel
+- The more data you gather, the better the solver can optimize
+
+⚠️ DO NOT write plans manually. Plans not from `run_solver` will be REJECTED.
+⚠️ DO NOT call `assemble_day` — the solver handles scheduling internally.
+
+"""
+
+_SOLVER_V4_GUIDANCE_ZH = _SOLVER_V4_GUIDANCE_EN  # Use English guidance for now
+
+
 # Build solver-enabled prompt: replace the assemble_day guidance with solver guidance
 def _build_solver_prompt(base: str, solver_guidance: str) -> str:
     """Replace the PLAN ASSEMBLY (assemble_day) block with solver guidance."""
@@ -229,14 +277,20 @@ def _build_solver_prompt(base: str, solver_guidance: str) -> str:
 SYSTEM_PROMPT_SOLVER_EN = _build_solver_prompt(SYSTEM_PROMPT_EN, _SOLVER_GUIDANCE_EN)
 SYSTEM_PROMPT_SOLVER_ZH = _build_solver_prompt(SYSTEM_PROMPT_ZH, _SOLVER_GUIDANCE_ZH)
 
+# v4: fixed template solver
+SYSTEM_PROMPT_SOLVER_V4_EN = _build_solver_prompt(SYSTEM_PROMPT_EN, _SOLVER_V4_GUIDANCE_EN)
+SYSTEM_PROMPT_SOLVER_V4_ZH = _build_solver_prompt(SYSTEM_PROMPT_ZH, _SOLVER_V4_GUIDANCE_ZH)
+
 
 def get_system_prompt(language: str = 'zh', variant: str = 'guided') -> str:
     """Get guided system prompt based on language and variant.
 
     Args:
         language: 'zh' or 'en'
-        variant: 'guided' (default) or 'solver' (harness_v3)
+        variant: 'guided' | 'solver' (harness_v3) | 'solver_v4' (harness_v4)
     """
+    if variant == 'solver_v4':
+        return SYSTEM_PROMPT_SOLVER_V4_EN if language == 'en' else SYSTEM_PROMPT_SOLVER_V4_ZH
     if variant == 'solver':
         return SYSTEM_PROMPT_SOLVER_EN if language == 'en' else SYSTEM_PROMPT_SOLVER_ZH
     if language == 'zh':
