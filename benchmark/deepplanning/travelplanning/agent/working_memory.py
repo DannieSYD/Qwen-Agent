@@ -147,9 +147,9 @@ class WorkingMemory:
         except json.JSONDecodeError:
             return f"[Stored] Trains {origin}→{dest} ({date}): No results or parse error"
 
-        # Trains have double-array structure [[{...}]]
+        # Trains have double-array structure [[{route1}], [{route2}], ...]
         if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
-            routes = data[0]  # Unwrap outer array
+            routes = [item for sublist in data for item in sublist]  # Flatten all routes
         elif isinstance(data, list):
             routes = data
         else:
@@ -168,6 +168,14 @@ class WorkingMemory:
                         seg = v
                         break
 
+            # Parse remaining seats
+            seats_key = 'Remaining Seats' if 'Remaining Seats' in seg else '剩余票数量'
+            remaining = seg.get(seats_key, '?')
+            try:
+                remaining_int = int(remaining)
+            except (ValueError, TypeError):
+                remaining_int = 999  # Unknown → assume available
+
             option = {
                 'train_no': seg.get('marketingTransportNo', '?'),
                 'dep_time': seg.get('depDateTime', '?'),
@@ -177,8 +185,16 @@ class WorkingMemory:
                 'duration': seg.get('duration', '?'),
                 'price': price,
                 'seat_class': seg.get('seatClassName', '?'),
+                'remaining_seats': remaining_int,
             }
             options.append(option)
+
+        # Filter: only keep trains with enough seats for the travel group
+        people = self.trip_meta.people_number if self.trip_meta else 1
+        if people and people > 0:
+            filtered = [o for o in options if o['remaining_seats'] >= people]
+            if filtered:
+                options = filtered
 
         entry = {'origin': origin, 'dest': dest, 'date': date, 'options': options}
         self.trains.append(entry)
@@ -212,6 +228,7 @@ class WorkingMemory:
                 'lat': h.get('latitude', '?'),
                 'lon': h.get('longitude', '?'),
                 'address': h.get('address', '?'),
+                'services': h.get('services', []),
             }
             self.hotels.append(hotel)
             # Also store coordinates in locations
@@ -224,7 +241,9 @@ class WorkingMemory:
         summary_lines = [f"[Stored] Hotels in {city}: {len(data)} options"]
         for h in self.hotels:
             if h['city'] == city:
-                summary_lines.append(f"  {h['name']}: ¥{h['price']}/night, {h['star']}-star, rating {h['rating']}, coords=({h['lat']}, {h['lon']})")
+                svc = h.get('services', [])
+                svc_str = f", services={svc}" if svc else ""
+                summary_lines.append(f"  {h['name']}: ¥{h['price']}/night, {h['star']}-star, rating {h['rating']}{svc_str}")
         return "\n".join(summary_lines)
 
     def _parse_recommend_attractions(self, args: dict, result: str) -> str:

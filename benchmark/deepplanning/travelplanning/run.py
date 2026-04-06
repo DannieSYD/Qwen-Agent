@@ -150,8 +150,8 @@ def parse_args():
     
     # Prompt variant
     parser.add_argument('--prompt-variant', type=str, default='default',
-                       choices=['default', 'explore', 'guided', 'guided_memory', 'harness_v1', 'harness_v2'],
-                       help='Prompt variant to use (default: original, explore: explore-first, guided: light guidance + validator, guided_memory: guided + working memory, harness_v1: guided + working memory + compacted tool schema, harness_v2: harness_v1 + constraint extraction)')
+                       choices=['default', 'explore', 'guided', 'guided_memory', 'harness_v1', 'harness_v2', 'harness_v3'],
+                       help='Prompt variant to use (default: original, explore: explore-first, guided: light guidance + validator, guided_memory: guided + working memory, harness_v1: guided + working memory + compacted tool schema, harness_v2: harness_v1 + constraint extraction, harness_v3: harness_v2 + LLM-generated OR-Tools solver)')
 
     # Advanced options
     parser.add_argument('--verbose', action='store_true',

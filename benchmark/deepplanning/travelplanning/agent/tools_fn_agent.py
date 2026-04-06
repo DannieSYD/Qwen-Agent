@@ -38,6 +38,76 @@ def _load_dotenv_for_module() -> None:
         pass
 
 
+def _data_summary_for_model(solver_data: Dict[str, Any]) -> str:
+    """Build a compact schema summary of the pre-loaded data dict for the model."""
+    lines = ["=== PRE-LOADED `data` DICT (do NOT redefine `data`) ==="]
+
+    meta = solver_data.get("trip_meta", {})
+    lines.append(f"data['trip_meta']: {json.dumps(meta, default=str)}")
+
+    n_c = len(solver_data.get("constraints", []))
+    lines.append(f"data['constraints']: {n_c} constraints")
+
+    for key in ("outbound_transport", "inbound_transport"):
+        items = solver_data.get(key, [])
+        lines.append(f"data['{key}']: {len(items)} options")
+        for t in items[:2]:
+            lines.append(f"  {t.get('id','')} dep={t.get('dep_time','')} price={t.get('price','')}")
+
+    hotels = solver_data.get("hotels", [])
+    lines.append(f"data['hotels']: {len(hotels)} hotels")
+    for h in hotels[:3]:
+        svc = h.get('services', [])
+        lines.append(f"  {h.get('name','')[:50]}: ¥{h.get('price','')}, {h.get('star','')}★, services={svc}")
+    if len(hotels) > 3:
+        lines.append(f"  ... ({len(hotels)} total)")
+
+    attrs = solver_data.get("attractions", {})
+    lines.append(f"data['attractions']: {len(attrs)} attractions (keys: {list(attrs.keys())[:5]})")
+
+    rests = solver_data.get("restaurants", [])
+    lines.append(f"data['restaurants']: {len(rests)} restaurants")
+    for r in rests[:3]:
+        lines.append(f"  {r.get('name','')[:40]}: ¥{r.get('price_per_person','')}/pp, tags={r.get('tags',[])}")
+    if len(rests) > 3:
+        lines.append(f"  ... ({len(rests)} total)")
+
+    routes = solver_data.get("routes", {})
+    lines.append(f"data['routes']: {len(routes)} routes")
+
+    lines.append("=== END data summary ===\n")
+    return "\n".join(lines)
+
+
+RUN_SOLVER_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "run_solver",
+        "description": (
+            "Execute Python code that uses OR-Tools CP-SAT to build an optimized "
+            "travel plan. The variable `data` is pre-loaded with all working memory "
+            "data (flights, trains, hotels, attractions, restaurants, routes, "
+            "constraints, trip metadata). Pre-imported: ortools.sat.python.cp_model, "
+            "datetime, timedelta, json, math. Your code should print() the final "
+            "plan text. If the solver finds the model infeasible, print an error "
+            "explaining which constraints conflict."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Python code to execute. Access working memory via the `data` "
+                        "dict. Must print() the complete plan text as output."
+                    )
+                }
+            },
+            "required": ["code"]
+        }
+    }
+}
+
 ASSEMBLE_DAY_SCHEMA = {
     "type": "function",
     "function": {
@@ -445,29 +515,73 @@ class ToolsFnAgent:
         )
 
     def _detect_tool_calls(self, assistant_message) -> List[Dict[str, Any]]:
-        """Detect and normalize tool calls"""
+        """Detect and normalize tool calls from structured API response or embedded tags."""
         import uuid
-        
+
         tool_calls = getattr(assistant_message, 'tool_calls', None)
         calls: List[Dict[str, Any]] = []
-        if not tool_calls:
+
+        # Primary: structured tool_calls from API
+        if tool_calls:
+            for idx, tc in enumerate(tool_calls):
+                try:
+                    tool_call_id = tc.id
+                    if tool_call_id is None or not tool_call_id:
+                        tool_call_id = f"call_{uuid.uuid4().hex[:24]}"
+                    calls.append({
+                        'id': tool_call_id,
+                        'name': tc.function.name,
+                        'arguments': tc.function.arguments,
+                    })
+                except Exception:
+                    continue
             return calls
-        
-        for idx, tc in enumerate(tool_calls):
-            try:
-                # Generate unique ID if not provided by the model
-                tool_call_id = tc.id
-                if tool_call_id is None or not tool_call_id:
-                    tool_call_id = f"call_{uuid.uuid4().hex[:24]}"
-                
-                calls.append({
-                    'id': tool_call_id,
-                    'name': tc.function.name,
-                    'arguments': tc.function.arguments,
-                })
-            except Exception:
-                continue
-        
+
+        # Fallback: parse <tool_call>...</tool_call> tags from content
+        # (some models/servers emit tool calls as text instead of structured response)
+        content = getattr(assistant_message, 'content', '') or ''
+        if '<tool_call>' in content:
+            matches = re.findall(r'<tool_call>\s*(.*?)\s*</tool_call>', content, re.DOTALL)
+            for match in matches:
+                try:
+                    tc_data = json.loads(match)
+                except json.JSONDecodeError:
+                    # The code field often has unescaped quotes — extract name and
+                    # arguments separately using regex
+                    try:
+                        name_match = re.search(r'"name"\s*:\s*"([^"]+)"', match)
+                        args_match = re.search(r'"arguments"\s*:\s*\{(.*)\}\s*$', match, re.DOTALL)
+                        if name_match and args_match:
+                            name = name_match.group(1)
+                            # Extract code from arguments — find "code": "..." boundary
+                            args_raw = '{' + args_match.group(1) + '}'
+                            code_match = re.search(r'"code"\s*:\s*"', args_raw)
+                            if code_match:
+                                code_start = code_match.end()
+                                # Code ends at the last "} — find it by rfind
+                                code_end = args_raw.rfind('"')
+                                code_str = args_raw[code_start:code_end]
+                                # Unescape basic sequences
+                                code_str = code_str.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"')
+                                tc_data = {'name': name, 'arguments': {'code': code_str}}
+                            else:
+                                continue
+                        else:
+                            continue
+                    except Exception:
+                        continue
+
+                name = tc_data.get('name', '')
+                arguments = tc_data.get('arguments', {})
+                if isinstance(arguments, dict):
+                    arguments = json.dumps(arguments)
+                if name:
+                    calls.append({
+                        'id': f"call_{uuid.uuid4().hex[:24]}",
+                        'name': name,
+                        'arguments': arguments,
+                    })
+
         return calls
 
     def _extract_plan_content(self, text: str) -> str:
@@ -687,7 +801,8 @@ class ToolsFnAgent:
             max_llm_calls: int = 100,
             enable_memory: bool = False,
             compact_outputs: bool = False,
-            extracted_constraints: Optional[tuple] = None) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
+            extracted_constraints: Optional[tuple] = None,
+            enable_solver: bool = False) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """
         Agent main loop: Call LLM → Execute tools → Repeat until final answer
 
@@ -702,6 +817,7 @@ class ToolsFnAgent:
             extracted_constraints: Optional (trip_meta, constraints, rendered_str) tuple
                            from Phase 1 constraint extraction. If provided, stored in
                            working memory and rendered in the memory snapshot.
+            enable_solver: If True, add run_solver tool for LLM-generated OR-Tools code
 
         Returns:
             (final_plan, messages, token_usage): Final plan, complete message history, and token usage
@@ -722,9 +838,13 @@ class ToolsFnAgent:
 
         # When memory is enabled, add the assemble_day tool so the model can
         # build day plans with deterministic timestamps from working memory.
+        # When solver is enabled, also add run_solver for LLM-generated CP-SAT code.
         tools_for_llm = self.openai_tools
         if enable_memory:
-            tools_for_llm = self.openai_tools + [ASSEMBLE_DAY_SCHEMA]
+            extra_tools = [ASSEMBLE_DAY_SCHEMA]
+            if enable_solver:
+                extra_tools.append(RUN_SOLVER_SCHEMA)
+            tools_for_llm = self.openai_tools + extra_tools
 
         messages: List[Dict[str, Any]] = []
         if system_prompt:
@@ -735,6 +855,8 @@ class ToolsFnAgent:
         total_completion_tokens = 0
         total_tokens = 0
         empty_plan_retries = 0
+        solver_was_called = False  # Track whether run_solver has been invoked
+        solver_nudge_count = 0  # Limit how many times we nudge for solver usage
 
         llm_budget = max_llm_calls
 
@@ -757,6 +879,12 @@ class ToolsFnAgent:
             msg = resp.choices[0].message
             calls = self._detect_tool_calls(msg)
 
+            # Retry detection if content has <tool_call> tags but no calls found
+            if not calls:
+                _c = getattr(msg, 'content', None) or ''
+                if '<tool_call>' in _c:
+                    calls = self._detect_tool_calls(msg)
+
             messages.append(msg)
             if calls:
                 # Execute tool calls
@@ -773,6 +901,55 @@ class ToolsFnAgent:
                             "tool_call_id": call['id'],
                             "name": call['name'],
                             "content": tool_content,
+                        })
+                        continue
+
+                    # --- Special handling: run_solver executes LLM-generated code ---
+                    if call['name'] == 'run_solver' and memory:
+                        solver_was_called = True
+                        try:
+                            args = json.loads(call['arguments']) if call['arguments'] else {}
+                        except json.JSONDecodeError:
+                            args = {}
+                        try:
+                            from solver.executor import run_solver_code
+                            from solver.data_export import export_memory_as_dict
+                            solver_data = export_memory_as_dict(memory)
+                            tool_content = run_solver_code(
+                                code=args.get('code', ''),
+                                data=solver_data,
+                            )
+                        except ImportError:
+                            from agent.solver.executor import run_solver_code
+                            from agent.solver.data_export import export_memory_as_dict
+                            solver_data = export_memory_as_dict(memory)
+                            tool_content = run_solver_code(
+                                code=args.get('code', ''),
+                                data=solver_data,
+                            )
+
+                        # Build data summary so model sees exact dict structure
+                        data_summary = _data_summary_for_model(solver_data)
+
+                        # If solver succeeded (no error), auto-extract as final plan
+                        if not tool_content.startswith('SOLVER_ERROR') and not tool_content.startswith('SOLVER_INFEASIBLE') and not tool_content.startswith('SOLVER_FEEDBACK'):
+                            # Keep data summary in message history (for reference if validation fails)
+                            # but return clean plan as the final output
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": call['id'],
+                                "name": call['name'],
+                                "content": data_summary + tool_content,
+                            })
+                            token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
+                            return tool_content, messages, token_usage, memory
+
+                        # Solver failed — prepend data summary so model sees actual structure
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call['id'],
+                            "name": call['name'],
+                            "content": data_summary + tool_content,
                         })
                         continue
 
@@ -819,20 +996,57 @@ class ToolsFnAgent:
 
             # No tool calls → try to extract plan
             final_content = self._extract_plan_content(msg.content or '')
+
+            # Guard: if solver is enabled but was never called, reject the manual plan
+            if final_content and enable_solver and not solver_was_called and solver_nudge_count < 2 and llm_budget > 0:
+                solver_nudge_count += 1
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "REJECTED: You wrote the plan manually. You MUST call the `run_solver` tool.\n\n"
+                        "Here is a minimal template — adapt it to your data:\n"
+                        "```python\n"
+                        "model = cp_model.CpModel()\n"
+                        "solver = cp_model.CpSolver()\n"
+                        "# Boolean selection: one hotel, one outbound, one inbound\n"
+                        "h_sel = [model.NewBoolVar(f'h{i}') for i in range(len(data['hotels']))]\n"
+                        "model.AddExactlyOne(h_sel)\n"
+                        "ob_sel = [model.NewBoolVar(f'ob{i}') for i in range(len(data['outbound_transport']))]\n"
+                        "model.AddExactlyOne(ob_sel)\n"
+                        "ib_sel = [model.NewBoolVar(f'ib{i}') for i in range(len(data['inbound_transport']))]\n"
+                        "model.AddExactlyOne(ib_sel)\n"
+                        "# Budget constraint: sum of selected costs <= budget\n"
+                        "# ... add constraints, solve, then print plan using solver.Value()\n"
+                        "```\n"
+                        "Call `run_solver` with your complete code NOW."
+                    ),
+                })
+                continue
+
             if final_content:
                 token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
                 return final_content, messages, token_usage, memory
 
-            # Empty plan — nudge the model to output in correct format (max 2 retries)
+            # Empty plan — nudge the model
             empty_plan_retries += 1
             if empty_plan_retries <= 2 and llm_budget > 0:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "Your response did not contain a travel plan in <plan>...</plan> tags. "
-                        "Please output your complete travel plan now, enclosed in <plan>...</plan> tags."
-                    ),
-                })
+                if enable_solver and not solver_was_called:
+                    # Solver mode: nudge to call run_solver, not write manually
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Do not explain. Just call `run_solver` now with your Python code. "
+                            "Do not output any text — only make a tool call to `run_solver`."
+                        ),
+                    })
+                else:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your response did not contain a travel plan in <plan>...</plan> tags. "
+                            "Please output your complete travel plan now, enclosed in <plan>...</plan> tags."
+                        ),
+                    })
                 continue
 
             # Exhausted retries — return empty
@@ -864,10 +1078,11 @@ class ToolsFnAgent:
         total_completion_tokens = 0
         total_tokens = 0
 
-        # Include assemble_day tool when memory is available
+        # Include assemble_day (and run_solver if available) when memory is present
         tools_for_llm = self.openai_tools
         if memory is not None:
-            tools_for_llm = self.openai_tools + [ASSEMBLE_DAY_SCHEMA]
+            extra_tools = [ASSEMBLE_DAY_SCHEMA, RUN_SOLVER_SCHEMA]
+            tools_for_llm = self.openai_tools + extra_tools
 
         llm_budget = max_llm_calls
 
@@ -903,6 +1118,42 @@ class ToolsFnAgent:
                             "tool_call_id": call['id'],
                             "name": call['name'],
                             "content": tool_content,
+                        })
+                        continue
+
+                    # Handle run_solver via solver executor (same as run())
+                    if call['name'] == 'run_solver' and memory:
+                        try:
+                            args = json.loads(call['arguments']) if call['arguments'] else {}
+                        except json.JSONDecodeError:
+                            args = {}
+                        try:
+                            from solver.executor import run_solver_code
+                            from solver.data_export import export_memory_as_dict
+                        except ImportError:
+                            from agent.solver.executor import run_solver_code
+                            from agent.solver.data_export import export_memory_as_dict
+                        solver_data = export_memory_as_dict(memory)
+                        tool_content = run_solver_code(
+                            code=args.get('code', ''),
+                            data=solver_data,
+                        )
+                        data_summary = _data_summary_for_model(solver_data)
+                        # Auto-extract successful solver output as final plan
+                        if not tool_content.startswith('SOLVER_ERROR') and not tool_content.startswith('SOLVER_INFEASIBLE') and not tool_content.startswith('SOLVER_FEEDBACK'):
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": call['id'],
+                                "name": call['name'],
+                                "content": data_summary + tool_content,
+                            })
+                            token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
+                            return tool_content, messages, token_usage
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call['id'],
+                            "name": call['name'],
+                            "content": data_summary + tool_content,
                         })
                         continue
 
@@ -991,7 +1242,7 @@ def run_agent_inference(
     # Load .env early so API keys are available for constraint extraction
     _load_dotenv_for_module()
 
-    if prompt_variant in ('guided', 'guided_memory', 'harness_v1', 'harness_v2'):
+    if prompt_variant in ('guided', 'guided_memory', 'harness_v1', 'harness_v2', 'harness_v3'):
         try:
             from prompts_guided import get_system_prompt
         except ImportError:
@@ -1008,24 +1259,26 @@ def run_agent_inference(
             from agent.prompts import get_system_prompt
 
     # Import validator for guided variants
-    if prompt_variant in ('guided', 'guided_memory', 'harness_v1', 'harness_v2'):
+    if prompt_variant in ('guided', 'guided_memory', 'harness_v1', 'harness_v2', 'harness_v3'):
         try:
             from plan_validator import validate_plan, build_correction_message
         except ImportError:
             from agent.plan_validator import validate_plan, build_correction_message
 
-    # Phase 1: Import constraint extractor for harness_v2
-    enable_constraint_extraction = (prompt_variant == 'harness_v2')
+    # Phase 1: Import constraint extractor for harness_v2 and harness_v3
+    enable_constraint_extraction = (prompt_variant in ('harness_v2', 'harness_v3'))
     if enable_constraint_extraction:
         try:
             from constraint_extractor import extract_constraints, render_constraints_for_prompt
         except ImportError:
             from agent.constraint_extractor import extract_constraints, render_constraints_for_prompt
 
-    # Enable working memory for guided_memory, harness_v1, and harness_v2 variants
-    enable_memory = (prompt_variant in ('guided_memory', 'harness_v1', 'harness_v2'))
-    # Enable compact outputs for harness_v1 and harness_v2
-    compact_outputs = (prompt_variant in ('harness_v1', 'harness_v2'))
+    # Enable working memory for guided_memory, harness_v1, harness_v2, harness_v3
+    enable_memory = (prompt_variant in ('guided_memory', 'harness_v1', 'harness_v2', 'harness_v3'))
+    # Enable compact outputs for harness_v1+
+    compact_outputs = (prompt_variant in ('harness_v1', 'harness_v2', 'harness_v3'))
+    # Enable solver tool for harness_v3
+    enable_solver = (prompt_variant == 'harness_v3')
     
     print_lock = Lock()
     results = []
@@ -1047,7 +1300,10 @@ def run_agent_inference(
                 language=language
             )
             
-            system_prompt = get_system_prompt(language)
+            if prompt_variant == 'harness_v3':
+                system_prompt = get_system_prompt(language, variant='solver')
+            else:
+                system_prompt = get_system_prompt(language)
             start_time = time.time()
 
             # Phase 1: Extract constraints before running agent
@@ -1070,10 +1326,11 @@ def run_agent_inference(
                 enable_memory=enable_memory,
                 compact_outputs=compact_outputs,
                 extracted_constraints=extracted_constraints,
+                enable_solver=enable_solver,
             )
 
             # Validation loop for guided variants (max 2 correction rounds)
-            if prompt_variant in ('guided', 'guided_memory', 'harness_v1', 'harness_v2') and final_plan and final_plan != "Reached max LLM calls without final answer.":
+            if prompt_variant in ('guided', 'guided_memory', 'harness_v1', 'harness_v2', 'harness_v3') and final_plan and final_plan != "Reached max LLM calls without final answer.":
                 max_corrections = 2
                 for correction_round in range(max_corrections):
                     serialized_for_validation = agent._serialize_messages(full_messages)
