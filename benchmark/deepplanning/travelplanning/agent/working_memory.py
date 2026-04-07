@@ -1048,7 +1048,10 @@ class WorkingMemory:
                 break
 
         if not route:
-            return {'error': f"No route found: {origin} → {dest}. Query query_road_route_info first."}
+            # Estimate from coordinates if available (better than skipping entirely)
+            route = self._estimate_route(origin, dest)
+            if not route:
+                return {'error': f"No route found: {origin} → {dest}. Query query_road_route_info first."}
 
         dur = int(route['duration_min']) if isinstance(route['duration_min'], (int, float)) else 10
         dist_m = route['distance_m'] if isinstance(route['distance_m'], (int, float)) else 0
@@ -1059,6 +1062,40 @@ class WorkingMemory:
         end = start + timedelta(minutes=dur)
         line = f"{self._fmt(start)}-{self._fmt(end)} | travel_city | {origin} - {dest}, {dist_km}, {dur}min, ¥{cost}"
         return {'line': line, 'end_time': end}
+
+    def _estimate_route(self, origin: str, dest: str) -> Optional[Dict]:
+        """Estimate a route from coordinates when no queried route exists."""
+        origin_loc = self.locations.get(origin)
+        dest_loc = self.locations.get(dest)
+        if not origin_loc or not dest_loc:
+            return None
+        try:
+            lat1, lon1 = float(origin_loc['lat']), float(origin_loc['lon'])
+            lat2, lon2 = float(dest_loc['lat']), float(dest_loc['lon'])
+        except (ValueError, TypeError):
+            return None
+
+        # Haversine distance
+        R = 6371000  # Earth radius in meters
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = (math.sin(dlat / 2) ** 2 +
+             math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+             math.sin(dlon / 2) ** 2)
+        dist_m = R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+        # City driving: ~1.4x straight-line, ~25 km/h average speed
+        road_dist_m = dist_m * 1.4
+        dur_min = max(1, int(road_dist_m / (25000 / 60)))  # 25 km/h
+        cost = max(0, int(road_dist_m / 1000 * 3))  # ~¥3/km
+
+        return {
+            'origin_name': origin,
+            'dest_name': dest,
+            'distance_m': road_dist_m,
+            'duration_min': dur_min,
+            'cost': cost,
+        }
 
     def _find_restaurant(self, name: str) -> Optional[Dict]:
         """Find a restaurant by name in memory."""

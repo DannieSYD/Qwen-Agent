@@ -434,10 +434,10 @@ class CPSATEntitySelector:
 
     def _add_structural_constraints(self, model, a_vars, attr_names, r_vars, r_list):
         """Domain-structural constraints (always true for travel planning)."""
-        # Minimum meals: ~2 per full day, ~1 per travel day
         full_days = max(self.days - 2, 0)
-        # Arrival + departure days get ~1 meal each, full days get 2
-        min_meals = max(full_days * 2 + 2, 2)
+        # Minimum meals: each day needs ~2, travel days need ~1.
+        # Formula: 2 per full day + 1 per arrival day + 1 per departure day = 2*days - 1
+        min_meals = max(2 * self.days - 1, 2)
         max_meals = self.days * 2
 
         if r_list:

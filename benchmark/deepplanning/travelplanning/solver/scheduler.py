@@ -428,6 +428,13 @@ class GreedyScheduler:
                     "restaurant": lunch["name"], "duration_min": 60,
                 })
 
+            # If both meals and not enough attractions between them,
+            # insert hotel rest to ensure >=2h gap (accounting for travel time)
+            if dinner and not dinner_placed and lunch:
+                activities.append({
+                    "type": "hotel", "action": "Rest", "duration_min": 150,
+                })
+
             if dinner and not dinner_placed:
                 activities.append({
                     "type": "meal", "meal_type": "Dinner",
