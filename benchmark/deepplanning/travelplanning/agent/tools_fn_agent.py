@@ -130,6 +130,38 @@ RUN_SOLVER_SCHEMA = {
     }
 }
 
+RESOLVE_CONSTRAINT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "resolve_constraint",
+        "description": (
+            "Resolve a fuzzy constraint by mapping the user's term to the actual "
+            "database value. Use this when run_solver reports SOLVER_FUZZY_UNRESOLVED "
+            "and shows available values. For example, if the user said 'birthday set "
+            "menu' but the database has 'Birthday Package', call this to map it. "
+            "After resolving all fuzzy constraints, call run_solver again."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "variable": {
+                    "type": "string",
+                    "description": "The constraint variable (e.g., 'restaurant.tag', 'hotel.service')"
+                },
+                "original_value": {
+                    "type": "string",
+                    "description": "The original value from the constraint that had no match"
+                },
+                "resolved_value": {
+                    "type": "string",
+                    "description": "The database value that best matches the user's intent"
+                }
+            },
+            "required": ["variable", "original_value", "resolved_value"]
+        }
+    }
+}
+
 ASSEMBLE_DAY_SCHEMA = {
     "type": "function",
     "function": {
@@ -869,6 +901,8 @@ class ToolsFnAgent:
             if enable_solver:
                 schema = RUN_SOLVER_SCHEMA if solver_version == 'v4' else RUN_SOLVER_SCHEMA_V3
                 extra_tools.append(schema)
+                if solver_version == 'v4':
+                    extra_tools.append(RESOLVE_CONSTRAINT_SCHEMA)
             tools_for_llm = self.openai_tools + extra_tools
 
         messages: List[Dict[str, Any]] = []
@@ -881,6 +915,7 @@ class ToolsFnAgent:
         total_tokens = 0
         empty_plan_retries = 0
         solver_was_called = False  # Track whether run_solver has been invoked
+        solver_succeeded = False  # Track whether run_solver returned a valid plan
         solver_nudge_count = 0  # Limit how many times we nudge for solver usage
 
         llm_budget = max_llm_calls
@@ -929,6 +964,41 @@ class ToolsFnAgent:
                         })
                         continue
 
+                    # --- Special handling: resolve_constraint updates a constraint value ---
+                    if call['name'] == 'resolve_constraint' and memory:
+                        try:
+                            args = json.loads(call['arguments']) if call['arguments'] else {}
+                        except json.JSONDecodeError:
+                            args = {}
+                        variable = args.get('variable', '')
+                        original = args.get('original_value', '')
+                        resolved = args.get('resolved_value', '')
+                        # Update the constraint in memory
+                        updated = False
+                        for c in memory.constraints:
+                            if c.variable == variable and str(c.value) == str(original):
+                                c.value = resolved
+                                updated = True
+                                break
+                        if updated:
+                            tool_content = (
+                                f"Constraint updated: {variable} value changed from "
+                                f"'{original}' to '{resolved}'. Call run_solver again."
+                            )
+                        else:
+                            tool_content = (
+                                f"No constraint found with variable='{variable}' and "
+                                f"value='{original}'. Available constraints: "
+                                + ", ".join(f"{c.variable}={c.value}" for c in memory.constraints)
+                            )
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call['id'],
+                            "name": call['name'],
+                            "content": tool_content,
+                        })
+                        continue
+
                     # --- Special handling: run_solver ---
                     if call['name'] == 'run_solver' and memory:
                         solver_was_called = True
@@ -966,8 +1036,10 @@ class ToolsFnAgent:
                         # Build data summary so model sees exact dict structure
                         data_summary = _data_summary_for_model(solver_data)
 
-                        # If solver succeeded (no error), auto-extract as final plan
-                        if not tool_content.startswith('SOLVER_ERROR') and not tool_content.startswith('SOLVER_INFEASIBLE') and not tool_content.startswith('SOLVER_FEEDBACK'):
+                        # If solver succeeded (no error/feedback), auto-extract as final plan
+                        _SOLVER_FAIL_PREFIXES = ('SOLVER_ERROR', 'SOLVER_INFEASIBLE', 'SOLVER_FEEDBACK', 'SOLVER_FUZZY_UNRESOLVED')
+                        solver_succeeded = not any(tool_content.startswith(p) for p in _SOLVER_FAIL_PREFIXES)
+                        if solver_succeeded:
                             # Keep data summary in message history (for reference if validation fails)
                             # but return clean plan as the final output
                             messages.append({
@@ -1032,30 +1104,43 @@ class ToolsFnAgent:
             # No tool calls → try to extract plan
             final_content = self._extract_plan_content(msg.content or '')
 
-            # Guard: if solver is enabled but was never called, reject the manual plan
-            if final_content and enable_solver and not solver_was_called and solver_nudge_count < 2 and llm_budget > 0:
+            # Guard: if solver is enabled but hasn't produced a valid plan, reject manual plans
+            if final_content and enable_solver and not solver_succeeded and solver_nudge_count < 3 and llm_budget > 0:
                 solver_nudge_count += 1
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "REJECTED: You wrote the plan manually. You MUST call the `run_solver` tool.\n\n"
-                        "Here is a minimal template — adapt it to your data:\n"
-                        "```python\n"
-                        "model = cp_model.CpModel()\n"
-                        "solver = cp_model.CpSolver()\n"
-                        "# Boolean selection: one hotel, one outbound, one inbound\n"
-                        "h_sel = [model.NewBoolVar(f'h{i}') for i in range(len(data['hotels']))]\n"
-                        "model.AddExactlyOne(h_sel)\n"
-                        "ob_sel = [model.NewBoolVar(f'ob{i}') for i in range(len(data['outbound_transport']))]\n"
-                        "model.AddExactlyOne(ob_sel)\n"
-                        "ib_sel = [model.NewBoolVar(f'ib{i}') for i in range(len(data['inbound_transport']))]\n"
-                        "model.AddExactlyOne(ib_sel)\n"
-                        "# Budget constraint: sum of selected costs <= budget\n"
-                        "# ... add constraints, solve, then print plan using solver.Value()\n"
-                        "```\n"
-                        "Call `run_solver` with your complete code NOW."
-                    ),
-                })
+                if solver_version == 'v4':
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "REJECTED: You wrote the plan manually. You MUST call `run_solver` (no arguments).\n\n"
+                            "If `run_solver` returned SOLVER_FEEDBACK about missing data, query that data first, "
+                            "then call `run_solver` again.\n"
+                            "If it returned SOLVER_FUZZY_UNRESOLVED, call `resolve_constraint` to map fuzzy "
+                            "values, then call `run_solver` again.\n\n"
+                            "Do NOT write plans manually. Call `run_solver` now."
+                        ),
+                    })
+                else:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "REJECTED: You wrote the plan manually. You MUST call the `run_solver` tool.\n\n"
+                            "Here is a minimal template — adapt it to your data:\n"
+                            "```python\n"
+                            "model = cp_model.CpModel()\n"
+                            "solver = cp_model.CpSolver()\n"
+                            "# Boolean selection: one hotel, one outbound, one inbound\n"
+                            "h_sel = [model.NewBoolVar(f'h{i}') for i in range(len(data['hotels']))]\n"
+                            "model.AddExactlyOne(h_sel)\n"
+                            "ob_sel = [model.NewBoolVar(f'ob{i}') for i in range(len(data['outbound_transport']))]\n"
+                            "model.AddExactlyOne(ob_sel)\n"
+                            "ib_sel = [model.NewBoolVar(f'ib{i}') for i in range(len(data['inbound_transport']))]\n"
+                            "model.AddExactlyOne(ib_sel)\n"
+                            "# Budget constraint: sum of selected costs <= budget\n"
+                            "# ... add constraints, solve, then print plan using solver.Value()\n"
+                            "```\n"
+                            "Call `run_solver` with your complete code NOW."
+                        ),
+                    })
                 continue
 
             if final_content:
@@ -1369,7 +1454,8 @@ def run_agent_inference(
             )
 
             # Validation loop for guided variants (max 2 correction rounds)
-            if prompt_variant in _GUIDED_VARIANTS and final_plan and final_plan != "Reached max LLM calls without final answer.":
+            # Skip for harness_v4: solver output is deterministic, validation loop corrupts it
+            if prompt_variant in _GUIDED_VARIANTS and prompt_variant != 'harness_v4' and final_plan and final_plan != "Reached max LLM calls without final answer.":
                 max_corrections = 2
                 for correction_round in range(max_corrections):
                     serialized_for_validation = agent._serialize_messages(full_messages)

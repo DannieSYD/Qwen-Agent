@@ -164,11 +164,35 @@ class CPSATEntitySelector:
         if empty_feedback:
             return SolverResult(status="INFEASIBLE", feedback=empty_feedback)
 
+        # Reset unresolved fuzzy constraints tracker
+        self._unresolved_fuzzy: List[Dict] = []
+
         # Phase 2: build and solve CP-SAT model
         try:
-            return self._build_and_solve(ob_feasible, ib_feasible, h_feasible, r_feasible)
+            result = self._build_and_solve(ob_feasible, ib_feasible, h_feasible, r_feasible)
         except Exception as e:
             return SolverResult(status="ERROR", feedback=f"SOLVER_ERROR: {e}")
+
+        # Phase 3: if there are unresolved fuzzy constraints, append to feedback
+        if self._unresolved_fuzzy and result.status in ("OPTIMAL", "FEASIBLE"):
+            fuzzy_lines = ["SOLVER_FUZZY_UNRESOLVED: Some constraints could not be matched exactly.",
+                           "The solver produced a plan but these constraints were SKIPPED:"]
+            for uf in self._unresolved_fuzzy:
+                fuzzy_lines.append(
+                    f"  - {uf['variable']} {uf['operator']} \"{uf['value']}\" "
+                    f"→ no exact match found"
+                )
+                if uf.get("available"):
+                    fuzzy_lines.append(f"    Available {uf['field']}: {uf['available']}")
+            fuzzy_lines.append("")
+            fuzzy_lines.append(
+                "Call `resolve_constraint` for each unresolved constraint above, "
+                "mapping the user's term to the closest database value. "
+                "Then call `run_solver` again."
+            )
+            result.feedback = "\n".join(fuzzy_lines)
+
+        return result
 
     # ──────────────────────────────────────────────────────────────────────
     # Data completeness check
@@ -250,7 +274,8 @@ class CPSATEntitySelector:
         return feasible
 
     def _check_filtered_empty(self, ob, ib, hotels, restaurants) -> str:
-        """Check if pre-filtering emptied any required category."""
+        """Check if pre-filtering emptied any required category.
+        Reports available values so LLM can resolve fuzzy mismatches."""
         issues = []
         for label, feasible, raw, prefix in [
             ("outbound transport", ob, self.outbound_raw, "transport.outbound"),
@@ -262,15 +287,41 @@ class CPSATEntitySelector:
                 relevant = [
                     c for c in self.constraints
                     if c.get("variable", "").startswith(prefix)
+                    and c.get("variable", "") not in self._AT_LEAST_ONE_VARS
                 ]
                 desc = "; ".join(
                     f"{c['variable']} {c['operator']} {c['value']}" for c in relevant
                 )
-                issues.append(
+                # Collect available values for each filtering constraint
+                avail_lines = []
+                for c in relevant:
+                    suffix = c["variable"].split(".")[-1]
+                    field_key = _FIELD_MAP.get(suffix, suffix)
+                    avail_vals = set()
+                    for entity in raw:
+                        ev = entity.get(field_key)
+                        if isinstance(ev, list):
+                            avail_vals.update(str(v) for v in ev)
+                        elif ev is not None:
+                            avail_vals.add(str(ev))
+                    if avail_vals:
+                        avail_lines.append(
+                            f"    {c['variable']}: available values = {sorted(avail_vals)[:15]}"
+                        )
+                issue = (
                     f"No {label} satisfies constraints ({desc}). "
-                    f"Had {len(raw)} options, all filtered out. "
-                    f"Query more {label} or check constraint extraction."
+                    f"Had {len(raw)} options, all filtered out."
                 )
+                if avail_lines:
+                    issue += "\n" + "\n".join(avail_lines)
+                    issue += (
+                        f"\n    If the constraint value is a fuzzy match (e.g., user said "
+                        f"'swimming pool' but DB has 'Indoor Swimming Pool'), call "
+                        f"`resolve_constraint` to map it, then call `run_solver` again."
+                    )
+                else:
+                    issue += " Query more options."
+                issues.append(issue)
         if issues:
             return "SOLVER_INFEASIBLE: Constraint filtering eliminated all options.\n" + "\n".join(f"- {i}" for i in issues)
         return ""
@@ -457,6 +508,22 @@ class CPSATEntitySelector:
                     if matching:
                         # At least one matching restaurant must be selected
                         model.Add(sum(r_vars[j] for j in matching) >= 1)
+                    else:
+                        # No exact match — collect available values for fuzzy resolution
+                        available_vals = set()
+                        for r in r_list:
+                            r_val = r.get(field_key)
+                            if isinstance(r_val, list):
+                                available_vals.update(str(v) for v in r_val)
+                            elif r_val:
+                                available_vals.add(str(r_val))
+                        self._unresolved_fuzzy.append({
+                            "variable": variable,
+                            "operator": operator,
+                            "value": value,
+                            "field": f"restaurant {suffix} values",
+                            "available": sorted(available_vals)[:20],
+                        })
                 continue
 
             # ── Transport ID constraints (specific train/flight number) ──

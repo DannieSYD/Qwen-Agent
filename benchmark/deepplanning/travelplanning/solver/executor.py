@@ -344,6 +344,11 @@ def run_solver_template(
     if result.status == "ERROR":
         return f"SOLVER_ERROR: {result.feedback}"
 
+    # Check for unresolved fuzzy constraints — return feedback before scheduling
+    # so LLM can resolve them and re-run with correct constraints
+    if result.feedback and "SOLVER_FUZZY_UNRESOLVED" in result.feedback:
+        return result.feedback
+
     # Phase 2: Greedy scheduling
     scheduler = GreedyScheduler(data, result, memory)
     plan_text, sched_feedback = scheduler.schedule()

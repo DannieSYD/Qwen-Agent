@@ -249,6 +249,14 @@ The solver automatically:
 - After querying hotels, use recommend_restaurants near attractions or near the hotel
 - The more data you gather, the better the solver can optimize
 
+**Fuzzy constraint resolution:**
+If `run_solver` returns SOLVER_FUZZY_UNRESOLVED, it means a constraint value
+(e.g., "birthday set menu") didn't exactly match any database value, but similar
+values exist (e.g., "Birthday Package"). Use `resolve_constraint` to map the
+user's term to the closest database value:
+  resolve_constraint(variable="restaurant.tag", original_value="birthday set menu", resolved_value="Birthday Package")
+Then call `run_solver` again — the constraint will now match.
+
 ⚠️ DO NOT write plans manually. Plans not from `run_solver` will be REJECTED.
 ⚠️ DO NOT call `assemble_day` — the solver handles scheduling internally.
 
