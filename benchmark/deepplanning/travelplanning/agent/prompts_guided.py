@@ -216,14 +216,10 @@ _SOLVER_GUIDANCE_ZH = _SOLVER_GUIDANCE_EN  # Use English guidance for now
 _SOLVER_V4_GUIDANCE_EN = """
 
 ================================================================
-MANDATORY: USE run_solver TO BUILD YOUR PLAN
+MANDATORY: USE run_solver + ARRANGE THE PLAN YOURSELF
 ================================================================
-After gathering enough data, call `run_solver` (NO arguments needed).
-The solver automatically:
-1. Reads all Working Memory data (transport, hotels, attractions, restaurants, routes)
-2. Reads all extracted constraints from Phase 1
-3. Uses CP-SAT optimization to select entities satisfying all constraints
-4. Schedules them into a feasible day-by-day plan
+The solver selects WHICH entities to use (transport, hotel, attractions, restaurants)
+via constraint optimization. YOUR job is to arrange them into a sensible day-by-day plan.
 
 **Workflow:**
 1. Gather ALL data first:
@@ -233,15 +229,25 @@ The solver automatically:
    - Attractions: use recommend_attractions, then query_attraction_details for each
    - Restaurants: use recommend_restaurants near planned locations
    - Routes are computed automatically between known locations
+
 2. Call `run_solver` — no code, no arguments. Just call it.
-3. If SOLVER_FEEDBACK says data is missing:
-   - Query the missing data using the appropriate tool calls
-   - Call `run_solver` again (it re-reads Working Memory automatically)
-4. If SOLVER_INFEASIBLE:
-   - Read the feedback to understand which constraints conflict
-   - Query more options (e.g., more hotels, different transport) to expand choices
-   - Call `run_solver` again
-5. The solver output becomes the final plan automatically.
+3. If SOLVER_FEEDBACK says data is missing → query that data, then call `run_solver` again.
+4. If SOLVER_INFEASIBLE → query more options, then call `run_solver` again.
+5. If SOLVER_FUZZY_UNRESOLVED → use `resolve_constraint` to map fuzzy values, then call again.
+6. When `run_solver` returns SOLVER_SELECTION:
+   - You receive the exact entities the solver picked (transport, hotel, attractions, restaurants)
+   - You receive routes/travel times between locations
+   - **You MUST use ALL of them** — do not add, remove, or swap any entity
+   - Arrange them into a day-by-day plan using your judgment for:
+     • Activity ordering (nearby attractions together, minimize travel)
+     • Meal timing (lunch ~11:00-14:00, dinner ~17:00-21:00, gap ≥2 hours)
+     • Buffer time after train/flight arrival (luggage, transit to hotel)
+     • Check-in/check-out at the hotel
+     • Realistic visit durations within the given min-max range
+     • Pacing (don't cram too many activities, leave breathing room)
+   - Include travel_city segments between locations with duration, distance, and cost
+   - End with a Budget Summary
+   - Output the final plan in <plan>...</plan> tags
 
 **Tips for data gathering:**
 - Query transport in BOTH directions (outbound AND inbound)
@@ -249,16 +255,9 @@ The solver automatically:
 - After querying hotels, use recommend_restaurants near attractions or near the hotel
 - The more data you gather, the better the solver can optimize
 
-**Fuzzy constraint resolution:**
-If `run_solver` returns SOLVER_FUZZY_UNRESOLVED, it means a constraint value
-(e.g., "birthday set menu") didn't exactly match any database value, but similar
-values exist (e.g., "Birthday Package"). Use `resolve_constraint` to map the
-user's term to the closest database value:
-  resolve_constraint(variable="restaurant.tag", original_value="birthday set menu", resolved_value="Birthday Package")
-Then call `run_solver` again — the constraint will now match.
-
-⚠️ DO NOT write plans manually. Plans not from `run_solver` will be REJECTED.
-⚠️ DO NOT call `assemble_day` — the solver handles scheduling internally.
+⚠️ You MUST call `run_solver` before writing a plan. Plans without solver selection will be REJECTED.
+⚠️ You MUST include EVERY entity from the solver selection. Missing entities will be flagged.
+⚠️ DO NOT call `assemble_day` — arrange the plan yourself using the solver's entity selection.
 
 """
 

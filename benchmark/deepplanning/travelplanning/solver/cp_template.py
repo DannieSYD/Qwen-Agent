@@ -45,6 +45,8 @@ _FIELD_MAP = {
     "rating": "rating",
     "type": "type",
     "id": "id",
+    "decoration_time": "decoration_time",
+    "duration": "duration",
 }
 
 
@@ -56,6 +58,31 @@ def _safe_int(val, default=0) -> int:
         return int(round(float(val)))
     except (ValueError, TypeError):
         return default
+
+
+def _stem_match(w1: str, w2: str, min_prefix: int = 4) -> bool:
+    """Check if two words share a common root (prefix of length >= min_prefix)."""
+    n = min(len(w1), len(w2))
+    if n < min_prefix:
+        return w1 == w2  # short words must match exactly
+    return w1[:min_prefix] == w2[:min_prefix]
+
+
+_STOP_WORDS = frozenset({"and", "the", "a", "an", "or", "of", "in", "with", "for", "to"})
+
+
+def _words_overlap(target: str, candidate: str) -> bool:
+    """Check if target and candidate share meaningful words (stem-level)."""
+    import re
+    t_words = set(re.findall(r'\w+', target.lower())) - _STOP_WORDS
+    c_words = set(re.findall(r'\w+', candidate.lower())) - _STOP_WORDS
+    if not t_words or not c_words:
+        return False
+    for tw in t_words:
+        for cw in c_words:
+            if _stem_match(tw, cw):
+                return True
+    return False
 
 
 def _check_constraint(entity_val: Any, operator: str, target_val: Any) -> bool:
@@ -73,22 +100,47 @@ def _check_constraint(entity_val: Any, operator: str, target_val: Any) -> bool:
         target_str = str(target_val).lower()
         entity_strs = [str(v).lower() for v in entity_val]
         if operator in ("=", "in"):
-            return any(target_str in s for s in entity_strs)
+            # Try substring match first, then word-stem overlap
+            for s in entity_strs:
+                if target_str in s or s in target_str:
+                    return True
+                if _words_overlap(target_str, s):
+                    return True
+            return False
         return True
 
     # ── Numeric comparisons ──
+    # Normalize: extract year from date strings like "2025-12-31" → 2025
+    def _to_num(v):
+        s = str(v)
+        try:
+            return float(s)
+        except ValueError:
+            # Try extracting year from date string
+            import re
+            m = re.match(r'(\d{4})', s)
+            if m:
+                return float(m.group(1))
+            raise
+
     try:
-        ev = float(entity_val)
-        tv = float(target_val)
-        if operator == "=":
+        ev = _to_num(entity_val)
+        tv = _to_num(target_val)
+        # Normalize operators: after/before → >=/<= for numeric
+        op = operator
+        if op == "after":
+            op = ">="
+        elif op == "before":
+            op = "<="
+        if op == "=":
             return abs(ev - tv) < 0.01
-        elif operator == "<=":
+        elif op == "<=":
             return ev <= tv + 0.01
-        elif operator == ">=":
+        elif op == ">=":
             return ev >= tv - 0.01
-        elif operator == "<":
+        elif op == "<":
             return ev < tv
-        elif operator == ">":
+        elif op == ">":
             return ev > tv
     except (ValueError, TypeError):
         pass
@@ -253,8 +305,11 @@ class CPSATEntitySelector:
         relevant = [
             c for c in self.constraints
             if c.get("variable", "").startswith(var_prefix)
-            and c.get("certainty", "precise") == "precise"
             and c.get("variable", "") not in self._AT_LEAST_ONE_VARS
+            # Apply precise constraints always; fuzzy only if operator is
+            # strictly numeric (not "=" which could be fuzzy string match)
+            and (c.get("certainty", "precise") == "precise"
+                 or c.get("operator", "") in ("<=", ">=", "<", ">", "after", "before"))
         ]
         if not relevant:
             return list(entities)

@@ -149,6 +149,8 @@ def export_memory_as_dict(memory) -> Dict[str, Any]:
             "rating": _safe_float(h.get('rating')),
             "address": _clean(h.get('address', '')),
             "services": h.get('services', []),
+            "decoration_time": _safe_int(h.get('decoration_time')),
+            "brand": _clean(h.get('brand', '')),
         })
     result["hotels"] = hotels
 

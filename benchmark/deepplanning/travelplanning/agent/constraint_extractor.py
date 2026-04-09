@@ -32,6 +32,7 @@ class ConstraintTuple:
     layer: int                  # 1=local/specialized, 2=global/coupling, 3=commonsense/implicit
     source: str = "explicit"    # explicit (from query) | inferred (commonsense)
     raw_text: str = ""          # the original NL fragment this was extracted from
+    superlative: str = ""       # "" | "max" | "min" — indicates argmax/argmin over this field
 
 
 @dataclass
@@ -84,7 +85,8 @@ Return a JSON object with two keys:
       "schedule_sensitivity": "existential",
       "layer": 1,
       "source": "explicit",
-      "raw_text": "I'd like a three-star hotel"
+      "raw_text": "I'd like a three-star hotel",
+      "superlative": ""
     }
   ]
 }
@@ -93,9 +95,9 @@ Return a JSON object with two keys:
 ## Constraint Fields
 
 - **variable**: What the constraint applies to. Use dot notation:
-  - Transport: `transport.outbound.mode`, `transport.outbound.time`, `transport.inbound.mode`, `transport.inbound.time`, `transport.seat_class`
-  - Hotel: `hotel.star`, `hotel.service`, `hotel.brand`, `hotel.price`, `hotel.name`
-  - Restaurant: `restaurant.name`, `restaurant.tag`, `restaurant.cuisine`, `restaurant.location`, `restaurant.price`
+  - Transport: `transport.outbound.mode`, `transport.outbound.time`, `transport.outbound.duration`, `transport.inbound.mode`, `transport.inbound.time`, `transport.inbound.duration`, `transport.seat_class`
+  - Hotel: `hotel.star`, `hotel.service`, `hotel.brand`, `hotel.price`, `hotel.name`, `hotel.decoration_time`
+  - Restaurant: `restaurant.name`, `restaurant.tag`, `restaurant.cuisine`, `restaurant.location`, `restaurant.price`, `restaurant.rating`
   - Attraction: `attraction.name`, `attraction.type`, `attraction.must_visit`
   - Budget: `budget.total`
   - Schedule: `schedule.departure`, `schedule.return`
@@ -116,6 +118,17 @@ Return a JSON object with two keys:
   - 3 = Commonsense/implicit (not stated but expected: meal times, check-in buffers, opening hours)
 
 - **source**: `explicit` (directly stated in query) or `inferred` (commonsense, not written but expected)
+
+- **superlative**: `""` (none), `"max"` (pick entity with highest value), or `"min"` (pick entity with lowest value).
+  Use this when the user wants the BEST entity by some criterion:
+  - "highest-rated restaurant" → variable=`restaurant.rating`, superlative=`"max"`
+  - "cheapest hotel" → variable=`hotel.price`, superlative=`"min"`
+  - "newest renovated hotel" → variable=`hotel.decoration_time`, superlative=`"max"`
+  - "latest arrival train" → variable=`transport.inbound.time`, superlative=`"max"`
+  - "earliest departure" → variable=`transport.outbound.time`, superlative=`"min"`
+  - "shortest duration train" → variable=`transport.outbound.duration`, superlative=`"min"`
+  When superlative is set, the `value` field should contain the scope/filter (e.g., location name, brand name) or be empty if no filter.
+  The `operator` should be `=` for the scope filter.
 
 ## Guidelines
 - Extract EVERY constraint, including implicit ones (e.g., if traveling by train, the train must have enough seats for the group)
@@ -190,6 +203,7 @@ def extract_constraints(
                 layer=c.get("layer", 1),
                 source=c.get("source", "explicit"),
                 raw_text=c.get("raw_text", ""),
+                superlative=c.get("superlative", ""),
             )
             constraints.append(ct)
         except (TypeError, KeyError):

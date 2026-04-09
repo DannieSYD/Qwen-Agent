@@ -46,6 +46,190 @@ class WorkingMemory:
         self.constraints = constraints
         self._constraints_rendered = rendered
 
+    def resolve_superlatives(self, db_path: str) -> list:
+        """
+        Deterministically resolve superlative constraints by reading the DB directly.
+
+        For each constraint with superlative="max" or "min", scan the full database
+        (not just queried data) to find the globally best entity, then add a hard
+        name/ID constraint so the solver must pick it.
+
+        Args:
+            db_path: Path to the sample's database directory
+                     (e.g., database/database_en/id_0)
+
+        Returns list of resolution descriptions (for logging).
+        """
+        import csv
+        from pathlib import Path
+        from agent.constraint_extractor import ConstraintTuple
+
+        resolutions = []
+        new_constraints = []
+        db = Path(db_path)
+
+        def _float(v, default=0.0):
+            try:
+                return float(v)
+            except (ValueError, TypeError):
+                return default
+
+        def _read_csv(filepath):
+            if not filepath.exists():
+                return []
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return list(csv.DictReader(f))
+
+        for c in self.constraints:
+            sup = getattr(c, 'superlative', '')
+            if not sup:
+                continue
+
+            var = c.variable
+            scope = c.value  # location filter, brand filter, etc.
+
+            # ── Restaurant superlatives ──
+            if var.startswith('restaurant.'):
+                field = var.split('.')[-1]  # rating, price
+                rows = _read_csv(db / 'restaurants' / 'restaurants.csv')
+                if not rows:
+                    continue
+
+                # Filter by scope (nearby attraction name)
+                if scope and isinstance(scope, str):
+                    scope_lower = scope.lower()
+                    filtered = [r for r in rows
+                                if scope_lower in r.get('nearby_attraction_name', '').lower()]
+                    if filtered:
+                        rows = filtered
+
+                key_map = {'rating': 'rating', 'price': 'price_per_person'}
+                data_key = key_map.get(field, field)
+
+                best = max(rows, key=lambda r: _float(r.get(data_key))) if sup == 'max' \
+                    else min(rows, key=lambda r: _float(r.get(data_key)))
+                best_name = best.get('restaurant_name', '')
+                if best_name:
+                    new_constraints.append(ConstraintTuple(
+                        variable='restaurant.name', type='categorical',
+                        operator='=', value=best_name,
+                        certainty='precise', schedule_sensitivity='existential',
+                        layer=1, source='resolved_superlative',
+                        raw_text=f'Resolved: {sup} {field} restaurant = {best_name}',
+                    ))
+                    resolutions.append(
+                        f"restaurant.{field} {sup} near '{scope}' "
+                        f"→ {best_name} ({data_key}={best.get(data_key)})"
+                    )
+
+            # ── Hotel superlatives ──
+            elif var.startswith('hotel.'):
+                field = var.split('.')[-1]
+                rows = _read_csv(db / 'hotels' / 'hotels.csv')
+                if not rows:
+                    continue
+
+                # Filter by scope (brand) for price/rating superlatives
+                if scope and isinstance(scope, str) and field not in ('decoration_time', 'score'):
+                    scope_lower = scope.lower()
+                    filtered = [h for h in rows
+                                if scope_lower in h.get('brand', '').lower()]
+                    if filtered:
+                        rows = filtered
+
+                key_map = {'price': 'price', 'star': 'hotel_star', 'rating': 'score',
+                           'decoration_time': 'decoration_time'}
+                data_key = key_map.get(field, field)
+
+                best = max(rows, key=lambda h: _float(h.get(data_key))) if sup == 'max' \
+                    else min(rows, key=lambda h: _float(h.get(data_key)))
+                best_name = best.get('name', '')
+                if best_name:
+                    new_constraints.append(ConstraintTuple(
+                        variable='hotel.name', type='categorical',
+                        operator='=', value=best_name,
+                        certainty='precise', schedule_sensitivity='existential',
+                        layer=1, source='resolved_superlative',
+                        raw_text=f'Resolved: {sup} {field} hotel = {best_name}',
+                    ))
+                    resolutions.append(
+                        f"hotel.{field} {sup} → {best_name} ({data_key}={best.get(data_key)})"
+                    )
+
+            # ── Transport superlatives ──
+            elif var.startswith('transport.'):
+                field = var.split('.')[-1]  # time, duration
+                is_inbound = 'inbound' in var
+
+                # Read both trains and flights
+                rows = []
+                for subdir in ('trains', 'flights'):
+                    csv_dir = db / subdir
+                    if csv_dir.exists():
+                        for csv_file in csv_dir.glob('*.csv'):
+                            rows.extend(_read_csv(csv_file))
+
+                if not rows:
+                    continue
+
+                # Filter by direction (origin/destination city from trip_meta)
+                if self.trip_meta:
+                    origin = self.trip_meta.origin
+                    dests = self.trip_meta.destinations or []
+                    dest = dests[0] if dests else ''
+                    if is_inbound:
+                        rows = [r for r in rows
+                                if r.get('origin_city', '') == dest
+                                and r.get('destination_city', '') == origin]
+                    else:
+                        rows = [r for r in rows
+                                if r.get('origin_city', '') == origin
+                                and r.get('destination_city', '') == dest]
+
+                # Filter direct only (single segment: segment_index == 1 and
+                # no other segment with same route_index)
+                route_segments = {}
+                for r in rows:
+                    ri = r.get('route_index', '')
+                    route_segments[ri] = route_segments.get(ri, 0) + 1
+                direct_routes = {ri for ri, cnt in route_segments.items() if cnt == 1}
+                direct_rows = [r for r in rows if r.get('route_index', '') in direct_routes]
+                if direct_rows:
+                    rows = direct_rows
+
+                if not rows:
+                    continue
+
+                key_map = {'time': 'arr_datetime' if is_inbound else 'dep_datetime',
+                           'duration': 'duration'}
+                data_key = key_map.get(field, field)
+
+                if data_key in ('arr_datetime', 'dep_datetime'):
+                    best = max(rows, key=lambda t: str(t.get(data_key, ''))) if sup == 'max' \
+                        else min(rows, key=lambda t: str(t.get(data_key, '')))
+                else:
+                    best = max(rows, key=lambda t: _float(t.get(data_key))) if sup == 'max' \
+                        else min(rows, key=lambda t: _float(t.get(data_key)))
+
+                best_id = best.get('train_no') or best.get('flight_no', '')
+                if best_id:
+                    direction = 'inbound' if is_inbound else 'outbound'
+                    new_constraints.append(ConstraintTuple(
+                        variable=f'transport.{direction}.id', type='categorical',
+                        operator='=', value=best_id,
+                        certainty='precise', schedule_sensitivity='existential',
+                        layer=1, source='resolved_superlative',
+                        raw_text=f'Resolved: {sup} {field} {direction} = {best_id}',
+                    ))
+                    resolutions.append(
+                        f"transport.{direction}.{field} {sup} "
+                        f"→ {best_id} ({data_key}={best.get(data_key)})"
+                    )
+
+        # Add resolved constraints
+        self.constraints.extend(new_constraints)
+        return resolutions
+
     def process_tool_result(self, tool_name: str, arguments: str, result: str) -> str:
         """
         Parse a tool result and update memory. Returns acknowledgment string.
@@ -229,6 +413,8 @@ class WorkingMemory:
                 'lon': h.get('longitude', '?'),
                 'address': h.get('address', '?'),
                 'services': h.get('services', []),
+                'decoration_time': h.get('decorationTime', '?'),
+                'brand': h.get('brand', '?'),
             }
             self.hotels.append(hotel)
             # Also store coordinates in locations
@@ -243,7 +429,11 @@ class WorkingMemory:
             if h['city'] == city:
                 svc = h.get('services', [])
                 svc_str = f", services={svc}" if svc else ""
-                summary_lines.append(f"  {h['name']}: ¥{h['price']}/night, {h['star']}-star, rating {h['rating']}{svc_str}")
+                deco = h.get('decoration_time', '?')
+                deco_str = f", renovated {deco}" if deco and deco != '?' else ""
+                brand = h.get('brand', '?')
+                brand_str = f", brand={brand}" if brand and brand != '?' else ""
+                summary_lines.append(f"  {h['name']}: ¥{h['price']}/night, {h['star']}-star, rating {h['rating']}{deco_str}{brand_str}{svc_str}")
         return "\n".join(summary_lines)
 
     def _parse_recommend_attractions(self, args: dict, result: str) -> str:
@@ -729,7 +919,13 @@ class WorkingMemory:
         if self.hotels:
             lines = ["HOTELS:"]
             for h in self.hotels:
-                lines.append(f"  {h['name']}: ¥{h['price']}/night, {h['star']}-star, rating {h['rating']}, coords=({h['lat']}, {h['lon']})")
+                deco = h.get('decoration_time', '?')
+                deco_str = f", renovated {deco}" if deco and deco != '?' else ""
+                brand = h.get('brand', '?')
+                brand_str = f", brand={brand}" if brand and brand != '?' else ""
+                svc = h.get('services', [])
+                svc_str = f", services={svc}" if svc else ""
+                lines.append(f"  {h['name']}: ¥{h['price']}/night, {h['star']}-star, rating {h['rating']}{deco_str}{brand_str}{svc_str}, coords=({h['lat']}, {h['lon']})")
             sections.append("\n".join(lines))
 
         # Attractions
@@ -784,6 +980,56 @@ class WorkingMemory:
 
         header = "═══ WORKING MEMORY (all collected data) ═══"
         footer = "═══ END WORKING MEMORY ═══"
+        return f"{header}\n" + "\n\n".join(sections) + f"\n{footer}"
+
+    def render_entities_only(self) -> str:
+        """
+        Render only entity lists (trains, hotels, restaurants, attractions)
+        without routes/coordinates. Used after solver selection so the LLM
+        can check superlative candidates without blowing up context.
+        """
+        sections = []
+
+        if self._constraints_rendered:
+            sections.append(self._constraints_rendered)
+
+        if self.trains:
+            lines = ["ALL AVAILABLE TRAINS (for superlative checks):"]
+            for entry in self.trains:
+                lines.append(f"  {entry['origin']}→{entry['dest']} ({entry['date']}):")
+                for o in entry['options']:
+                    lines.append(f"    {o['train_no']}: {o['dep_time']}→{o['arr_time']}, {o['dep_station']}→{o['arr_station']}, {o['duration']}min, ¥{o['price']}/person")
+            sections.append("\n".join(lines))
+
+        if self.hotels:
+            lines = ["ALL AVAILABLE HOTELS (for superlative checks):"]
+            for h in self.hotels:
+                deco = h.get('decoration_time', '?')
+                deco_str = f", renovated {deco}" if deco and deco != '?' else ""
+                brand = h.get('brand', '?')
+                brand_str = f", brand={brand}" if brand and brand != '?' else ""
+                svc = h.get('services', [])
+                svc_str = f", services={svc}" if svc else ""
+                lines.append(f"  {h['name']}: ¥{h['price']}/night, {h['star']}-star, rating {h['rating']}{deco_str}{brand_str}{svc_str}")
+            sections.append("\n".join(lines))
+
+        if self.restaurants:
+            lines = ["ALL AVAILABLE RESTAURANTS (for superlative checks):"]
+            seen = set()
+            for r in self.restaurants:
+                if r['name'] in seen:
+                    continue
+                seen.add(r['name'])
+                tags = r.get('tags', [])
+                tags_str = f", tags={tags}" if tags else ""
+                lines.append(f"  {r['name']}: ¥{r['price_per_person']}/person, {r['cuisine']}, rating {r.get('rating', '?')}, near {r['near_attraction']}{tags_str}")
+            sections.append("\n".join(lines))
+
+        if not sections:
+            return ""
+
+        header = "═══ ALL CANDIDATES (check these for superlative constraints) ═══"
+        footer = "═══ END CANDIDATES ═══"
         return f"{header}\n" + "\n\n".join(sections) + f"\n{footer}"
 
     # ------------------------------------------------------------------

@@ -77,8 +77,14 @@ def scan_trajectories(model_filter: Optional[str] = None) -> List[Dict[str, str]
             if model_filter and model != model_filter:
                 continue
             traj_dir = model_lang_dir / "trajectories"
+            # Handle double-nested directories (e.g., model_en/model_en/trajectories/)
             if not traj_dir.exists():
-                continue
+                nested = list(model_lang_dir.glob("*/trajectories"))
+                if nested:
+                    traj_dir = nested[0]
+                    model_lang_dir = traj_dir.parent
+                else:
+                    continue
             # Load evaluation scores if available
             eval_dir = model_lang_dir / "evaluation"
             eval_scores: Dict[str, dict] = {}
@@ -185,6 +191,12 @@ def load_trajectory(case_key: str, model_filter: Optional[str] = None) -> Option
             return None
         model_name, model_dir = candidates[0]
         traj_file = model_dir / "trajectories" / f"id_{case_id}.json"
+        # Handle double-nested directories
+        if not traj_file.exists():
+            nested = list(model_dir.glob("*/trajectories"))
+            if nested:
+                model_dir = nested[0].parent
+                traj_file = model_dir / "trajectories" / f"id_{case_id}.json"
         if not traj_file.exists():
             print(f"Trajectory file not found: {traj_file}")
             return None

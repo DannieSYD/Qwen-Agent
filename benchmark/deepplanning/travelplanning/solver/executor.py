@@ -1,10 +1,14 @@
 """
-Solver executor — two modes:
+Solver executor — three modes:
 
 1. run_solver_template (v4): Fixed CP-SAT template + greedy scheduler.
    No LLM-generated code. Reads constraints + data, solves, returns plan.
 
-2. run_solver_code (v3, legacy): Sandboxed execution of LLM-generated code.
+2. run_solver_selection (v4): Fixed CP-SAT template, returns structured
+   entity selection for LLM-driven scheduling. The LLM arranges entities
+   into a day-by-day plan heuristically, faithful to the solver's picks.
+
+3. run_solver_code (v3, legacy): Sandboxed execution of LLM-generated code.
    Kept for backward compatibility.
 """
 
@@ -360,3 +364,242 @@ def run_solver_template(
         return plan_text + "\n\n" + sched_feedback
 
     return plan_text
+
+
+# ======================================================================
+# v4 LLM-scheduled: CP-SAT selects entities, LLM arranges them
+# ======================================================================
+
+def run_solver_selection(
+    data: Dict[str, Any],
+) -> str:
+    """
+    Run CP-SAT entity selection only — no scheduling.
+
+    Returns a structured entity selection prompt for the LLM to arrange
+    into a day-by-day plan heuristically. The LLM must use exactly these
+    entities (faithfulness constraint).
+
+    Args:
+        data: Working memory data dict (from export_memory_as_dict)
+
+    Returns:
+        Structured selection text on success, or prefixed feedback on failure.
+    """
+    try:
+        from solver.cp_template import CPSATEntitySelector
+    except ImportError:
+        from .cp_template import CPSATEntitySelector
+
+    selector = CPSATEntitySelector(data)
+    result = selector.solve()
+
+    if result.status == "MISSING_DATA":
+        return result.feedback
+
+    if result.status == "INFEASIBLE":
+        return result.feedback
+
+    if result.status == "ERROR":
+        return f"SOLVER_ERROR: {result.feedback}"
+
+    if result.feedback and "SOLVER_FUZZY_UNRESOLVED" in result.feedback:
+        return result.feedback
+
+    # Format as structured selection for LLM
+    return format_solver_selection(result, data)
+
+
+def format_solver_selection(result, data: Dict[str, Any]) -> str:
+    """
+    Format SolverResult into a structured entity selection prompt.
+
+    The LLM receives this as the run_solver tool output and must arrange
+    these entities into a coherent day-by-day travel plan.
+    """
+    meta = data.get("trip_meta", {})
+    attractions_data = data.get("attractions", {})
+    routes = data.get("routes", {})
+
+    lines = []
+    lines.append("SOLVER_SELECTION: The optimizer has selected the following entities.")
+    lines.append("You MUST use ALL of these in your plan — do not add, remove, or swap any.")
+    lines.append("")
+
+    # Trip metadata
+    lines.append(f"Trip: {meta.get('origin', '?')} → {', '.join(meta.get('destinations', []))} "
+                 f"| {meta.get('days', '?')} days | {meta.get('people', 1)} people "
+                 f"| {meta.get('rooms', 1)} room(s)")
+    lines.append(f"Dates: {meta.get('depart_date', '?')} to {meta.get('return_date', '?')}")
+    lines.append("")
+
+    # Outbound transport
+    ob = result.outbound
+    if ob:
+        lines.append("── Outbound Transport ──")
+        lines.append(f"  {ob.get('mode', 'train').capitalize()} {ob.get('id', '?')}: "
+                     f"{ob.get('dep_station', '?')} → {ob.get('arr_station', '?')}")
+        lines.append(f"  Departure: {ob.get('dep_time', '?')} | Arrival: {ob.get('arr_time', '?')}")
+        lines.append(f"  Price: ¥{ob.get('price', '?')}/person | Seat: {ob.get('seat_class', '?')}")
+        lines.append("")
+
+    # Inbound transport
+    ib = result.inbound
+    if ib:
+        lines.append("── Inbound Transport ──")
+        lines.append(f"  {ib.get('mode', 'train').capitalize()} {ib.get('id', '?')}: "
+                     f"{ib.get('dep_station', '?')} → {ib.get('arr_station', '?')}")
+        lines.append(f"  Departure: {ib.get('dep_time', '?')} | Arrival: {ib.get('arr_time', '?')}")
+        lines.append(f"  Price: ¥{ib.get('price', '?')}/person | Seat: {ib.get('seat_class', '?')}")
+        lines.append("")
+
+    # Hotel
+    h = result.hotel
+    if h:
+        lines.append("── Hotel ──")
+        lines.append(f"  {h.get('name', '?')} | {h.get('star', '?')}★ | ¥{h.get('price', '?')}/room/night")
+        services = h.get('services', [])
+        if services:
+            lines.append(f"  Services: {', '.join(services)}")
+        lines.append("")
+
+    # Attractions
+    if result.attractions:
+        lines.append(f"── Attractions ({len(result.attractions)} selected) ──")
+        for attr_name in result.attractions:
+            detail = attractions_data.get(attr_name, {})
+            price = detail.get('price', 0) or 0
+            open_t = detail.get('open', '?')
+            close_t = detail.get('close', '?')
+            visit_min = detail.get('visit_min_hrs', 1.0)
+            visit_max = detail.get('visit_max_hrs', 2.0)
+            lines.append(f"  • {attr_name}: ¥{price}/person, open {open_t}-{close_t}, "
+                         f"visit {visit_min}-{visit_max}h")
+        lines.append("")
+
+    # Restaurants
+    if result.restaurants:
+        lines.append(f"── Restaurants ({len(result.restaurants)} selected) ──")
+        for r in result.restaurants:
+            tags = r.get('tags', [])
+            tag_str = f" [{', '.join(tags)}]" if tags else ""
+            near = r.get('near', '')
+            near_str = f" (near {near})" if near else ""
+            lines.append(f"  • {r.get('name', '?')}: ¥{r.get('price_per_person', '?')}/person, "
+                         f"open {r.get('open', '?')}-{r.get('close', '?')}{tag_str}{near_str}")
+        lines.append("")
+
+    # Relevant routes
+    all_locations = []
+    if h:
+        all_locations.append(h.get('name', ''))
+    all_locations.extend(result.attractions)
+    all_locations.extend(r.get('name', '') for r in result.restaurants)
+    # Add stations
+    if ob:
+        all_locations.append(ob.get('arr_station', ''))
+    if ib:
+        all_locations.append(ib.get('dep_station', ''))
+
+    relevant_routes = []
+    for key, route_data in routes.items():
+        parts = key.split(" -> ")
+        if len(parts) == 2:
+            origin, dest = parts
+            if origin in all_locations and dest in all_locations:
+                dur = route_data.get('duration_min', '?')
+                dist = route_data.get('distance_km', '?')
+                cost = route_data.get('cost', '?')
+                relevant_routes.append(f"  {origin} → {dest}: {dur}min, {dist}km, ¥{cost}/person")
+
+    if relevant_routes:
+        lines.append("── Routes Between Selected Locations ──")
+        lines.extend(relevant_routes)
+        lines.append("")
+
+    # Cost breakdown
+    bd = result.cost_breakdown
+    lines.append("── Cost Breakdown (solver estimate) ──")
+    lines.append(f"  Transport: ¥{bd.get('transport', 0)}")
+    lines.append(f"  Hotel: ¥{bd.get('hotel', 0)}")
+    lines.append(f"  Meals: ¥{bd.get('meals', 0)}")
+    lines.append(f"  Attractions: ¥{bd.get('attractions', 0)}")
+    lines.append(f"  City transport (est.): ¥{bd.get('city_transport', 0)}")
+    lines.append(f"  Total: ¥{result.total_cost}")
+    lines.append("")
+
+    # Instructions
+    lines.append("── YOUR TASK ──")
+    lines.append("Arrange these entities into a complete day-by-day travel plan.")
+    lines.append("Rules:")
+    lines.append("  1. Use EVERY entity above — do not skip, add, or substitute any.")
+    lines.append("  2. Respect opening hours, visit durations, and transport times.")
+    lines.append("  3. Schedule meals at sensible times (lunch ~11:00-14:00, dinner ~17:00-21:00).")
+    lines.append("  4. Allow buffer time after arriving by train/flight (luggage, transit).")
+    lines.append("  5. Include travel_city segments between locations with duration, distance, and cost.")
+    lines.append("  6. End with a Budget Summary totaling all costs.")
+    lines.append("  7. Output the plan in <plan>...</plan> tags.")
+
+    return "\n".join(lines)
+
+
+def check_plan_faithfulness(plan_text: str, result, data: Dict[str, Any]) -> str:
+    """
+    Check that all solver-selected entities appear in the LLM's plan.
+
+    Args:
+        plan_text: The plan text generated by the LLM
+        result: SolverResult from run_solver_selection
+        data: Working memory data dict
+
+    Returns:
+        Empty string if faithful, or a correction message listing missing entities.
+    """
+    plan_lower = plan_text.lower()
+    missing = []
+
+    # Check outbound transport
+    if result.outbound:
+        ob_id = result.outbound.get('id', '')
+        if ob_id and ob_id.lower() not in plan_lower:
+            missing.append(f"Outbound transport: {ob_id}")
+
+    # Check inbound transport
+    if result.inbound:
+        ib_id = result.inbound.get('id', '')
+        if ib_id and ib_id.lower() not in plan_lower:
+            missing.append(f"Inbound transport: {ib_id}")
+
+    # Check hotel
+    if result.hotel:
+        h_name = result.hotel.get('name', '')
+        if h_name and h_name.lower() not in plan_lower:
+            missing.append(f"Hotel: {h_name}")
+
+    # Check attractions
+    for attr_name in result.attractions:
+        if attr_name.lower() not in plan_lower:
+            missing.append(f"Attraction: {attr_name}")
+
+    # Check restaurants
+    for r in result.restaurants:
+        r_name = r.get('name', '')
+        if r_name and r_name.lower() not in plan_lower:
+            missing.append(f"Restaurant: {r_name}")
+
+    if not missing:
+        return ""
+
+    lines = [
+        "FAITHFULNESS CHECK FAILED: Your plan is missing solver-selected entities.",
+        "You MUST include ALL of the following in your plan:",
+        "",
+    ]
+    for m in missing:
+        lines.append(f"  ✗ {m}")
+    lines.append("")
+    lines.append("Rewrite your plan to include every entity above. "
+                 "Do not remove any — just add the missing ones into appropriate day(s).")
+    lines.append("Output the corrected plan in <plan>...</plan> tags.")
+
+    return "\n".join(lines)
