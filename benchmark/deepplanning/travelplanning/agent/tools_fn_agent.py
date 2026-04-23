@@ -448,7 +448,7 @@ def run_agent_inference(
     def process_sample(sample):
         sample_id_raw = sample.get('id', 'unknown')
         sample_id = f"id_{sample_id_raw}" if str(sample_id_raw).isdigit() else str(sample_id_raw)
-        query = sample.get('query', '')
+        query = sample.get('query_with_constraints', '')
         
         try:
             with print_lock:
