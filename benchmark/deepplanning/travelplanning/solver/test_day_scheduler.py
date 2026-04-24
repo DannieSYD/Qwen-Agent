@@ -105,3 +105,47 @@ def test_forced_overlap_is_infeasible():
     }
     result = schedule_day(payload)
     assert result["status"] == "INFEASIBLE"
+
+
+def _meal_payload() -> dict:
+    """Payload with one attraction + lunch + dinner to exercise meal constraints."""
+    p = _minimal_payload()
+    p["attractions"] = [
+        {"poi_id": "A1", "name": "Museum", "open": "09:00", "close": "21:00",
+         "stay_min": 60, "stay_max": 60},
+    ]
+    p["lunch_restaurant"] = {
+        "poi_id": "R1", "name": "Lunch R",
+        "open": "11:00", "close": "14:00",
+        "stay_min": 60, "stay_max": 60,
+    }
+    p["dinner_restaurant"] = {
+        "poi_id": "R2", "name": "Dinner R",
+        "open": "17:00", "close": "21:00",
+        "stay_min": 60, "stay_max": 60,
+    }
+    p["transits"] = {
+        f"('{x}', '{y}')": {"duration_min": 10}
+        for x in ["HOTEL", "A1", "R1", "R2"]
+        for y in ["HOTEL", "A1", "R1", "R2"]
+        if x != y
+    }
+    return p
+
+
+def test_lunch_and_dinner_in_windows_with_gap():
+    result = schedule_day(_meal_payload())
+    assert result["status"] == "FEASIBLE"
+
+    meals = [e for e in result["schedule"] if e["type"] == "meal"]
+    assert len(meals) == 2
+    lunch = next(e for e in meals if e["name"] == "Lunch R")
+    dinner = next(e for e in meals if e["name"] == "Dinner R")
+
+    lunch_start = _hhmm_to_min(lunch["start"])
+    lunch_end = _hhmm_to_min(lunch["end"])
+    dinner_start = _hhmm_to_min(dinner["start"])
+
+    assert 11 * 60 + 30 <= lunch_start <= 13 * 60 + 30
+    assert 17 * 60 <= dinner_start <= 20 * 60 + 30
+    assert dinner_start - lunch_end >= 120

@@ -48,6 +48,7 @@ def _schedule_day_impl(payload: dict[str, Any]) -> dict[str, Any]:
 
     builder.add_ordering_and_transit(payload.get("transits", {}))
     builder.add_no_overlap()
+    builder.add_meal_constraints(payload)
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = DEFAULT_TIME_LIMIT_S
@@ -94,6 +95,28 @@ def _collect_activities(payload: dict[str, Any]) -> list[_Activity]:
             stay_min=int(a["stay_min"]),
             stay_max=int(a["stay_max"]),
         ))
+    lunch = payload.get("lunch_restaurant")
+    if lunch:
+        activities.append(_Activity(
+            aid=lunch["poi_id"],
+            name=lunch["name"],
+            kind="meal",
+            open_min=max(_parse_hhmm(lunch["open"]), LUNCH_WINDOW[0]),
+            close_min=min(_parse_hhmm(lunch["close"]), LUNCH_WINDOW[1] + int(lunch["stay_max"])),
+            stay_min=int(lunch["stay_min"]),
+            stay_max=int(lunch["stay_max"]),
+        ))
+    dinner = payload.get("dinner_restaurant")
+    if dinner:
+        activities.append(_Activity(
+            aid=dinner["poi_id"],
+            name=dinner["name"],
+            kind="meal",
+            open_min=max(_parse_hhmm(dinner["open"]), DINNER_WINDOW[0]),
+            close_min=min(_parse_hhmm(dinner["close"]), DINNER_WINDOW[1] + int(dinner["stay_max"])),
+            stay_min=int(dinner["stay_min"]),
+            stay_max=int(dinner["stay_max"]),
+        ))
     return activities
 
 
@@ -124,6 +147,38 @@ class _ModelBuilder:
         intervals = [self._vars[a.id][3] for a in self._activities]
         if intervals:
             self.model.AddNoOverlap(intervals)
+
+    def add_meal_constraints(self, payload: dict[str, Any]) -> None:
+        """Enforce meal-start windows (separate from business hours since
+        restaurant open hours may extend beyond the commonsense meal window),
+        and enforce a minimum gap between lunch and dinner.
+        """
+        lunch_id = (payload.get("lunch_restaurant") or {}).get("poi_id")
+        dinner_id = (payload.get("dinner_restaurant") or {}).get("poi_id")
+
+        if lunch_id and lunch_id in self._vars:
+            start = self._vars[lunch_id][0]
+            lit = self.model.NewBoolVar(f"lunch_window_{lunch_id}")
+            self.model.Add(start >= LUNCH_WINDOW[0]).OnlyEnforceIf(lit)
+            self.model.Add(start <= LUNCH_WINDOW[1]).OnlyEnforceIf(lit)
+            self.model.AddAssumption(lit)
+            self._labels.append((lit, f"lunch_window in [{_format_hhmm(LUNCH_WINDOW[0])}, {_format_hhmm(LUNCH_WINDOW[1])}]"))
+
+        if dinner_id and dinner_id in self._vars:
+            start = self._vars[dinner_id][0]
+            lit = self.model.NewBoolVar(f"dinner_window_{dinner_id}")
+            self.model.Add(start >= DINNER_WINDOW[0]).OnlyEnforceIf(lit)
+            self.model.Add(start <= DINNER_WINDOW[1]).OnlyEnforceIf(lit)
+            self.model.AddAssumption(lit)
+            self._labels.append((lit, f"dinner_window in [{_format_hhmm(DINNER_WINDOW[0])}, {_format_hhmm(DINNER_WINDOW[1])}]"))
+
+        if lunch_id and dinner_id and lunch_id in self._vars and dinner_id in self._vars:
+            lunch_end = self._vars[lunch_id][1]
+            dinner_start = self._vars[dinner_id][0]
+            lit = self.model.NewBoolVar("meal_gap")
+            self.model.Add(dinner_start - lunch_end >= MIN_MEAL_GAP_MIN).OnlyEnforceIf(lit)
+            self.model.AddAssumption(lit)
+            self._labels.append((lit, f"meal_gap >= {MIN_MEAL_GAP_MIN}min"))
 
     def add_ordering_and_transit(self, transits: dict[str, dict]) -> None:
         """For each ordered pair (i, j) of activities, create next_ij boolean.
