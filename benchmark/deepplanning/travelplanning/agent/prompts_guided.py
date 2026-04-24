@@ -274,10 +274,42 @@ HARNESS_V5_PROMPT = """You are a travel planning agent. You pick entities; the s
    - Read `unsat_core`. It lists the minimal set of conflicting constraints.
    - Decide what to change: re-assign an attraction to a different day, swap a restaurant for one with different hours, pick a later inbound train, drop an optional attraction, etc.
    - Call `schedule_day` again. Limit to 3 retries per day; after that, move on with a best-effort partial plan.
-6. After all days are scheduled, assemble the final plan text yourself:
-   - Stitch per-day `schedule` lists into the judge's expected markdown format.
-   - **You are responsible for budget verification.** Sum prices × people/rooms; if over budget, go back and swap cheaper entities.
-   - Include all required fields (transport, accommodation, meals, sightseeing).
+6. After all days are scheduled, assemble the final plan and **emit it inside `<plan>...</plan>` tags** in exactly the format below. No preamble, no trailing commentary — anything outside the tags is ignored by the judge but adds latency.
+
+## Final plan format (STRICT — deviation is penalized)
+
+```
+<plan>
+Day 1:
+Current City: from ORIGIN to DESTINATION
+Accommodation: Hotel Name, ¥PRICE/room/night
+HH:MM-HH:MM | activity_type | description
+HH:MM-HH:MM | activity_type | description
+...
+
+Day 2:
+Current City: from X to Y
+Accommodation: Hotel Name, ¥PRICE/room/night   (or "-" on the final day, no hotel stay)
+HH:MM-HH:MM | activity_type | description
+...
+</plan>
+```
+
+**Day coverage:** each day MUST span 00:00 to 24:00 contiguously. Before the first real activity, fill with `hotel | Rest, HOTEL_NAME` (Day 2+) or `buffer | Rest and morning preparation in ORIGIN_CITY` (Day 1). After the last real activity, fill the tail with `hotel | Rest, HOTEL_NAME` (non-final day) or leave the trip boundary at the return-train arrival time.
+
+**Activity types and their description conventions:**
+- `travel_intercity_public` — `train TRAIN_NO, FROM_STATION - TO_STATION, ¥PRICE/person`
+- `buffer` — free-text, e.g. `Security check, waiting for boarding`, `Alighting, station exit, taxi queue`, `Rest and morning preparation in CITY`, `Stroll around X before dinner`
+- `travel_city` — `ORIGIN - DESTINATION, DISTANCE_KMkm, DURATION_MINmin, ¥COST` (cost is per vehicle, not per person; use the route lookup's cost)
+- `hotel` — one of `Check-in, HOTEL_NAME` | `Check-out, HOTEL_NAME` | `Rest, HOTEL_NAME`
+- `attraction` — `ATTRACTION_NAME, ¥PRICE/person`
+- `meal` — `Lunch, RESTAURANT_NAME, ¥PRICE/person` or `Dinner, RESTAURANT_NAME, ¥PRICE/person`
+
+**Accommodation line:** On every non-final day, this line must hold the hotel name plus per-room-per-night price. On the final day (returning to origin, no overnight), write exactly `Accommodation: -`.
+
+**Budget verification is your job.** After writing the `<plan>` block, sanity-check:
+`train_price × people × 2 + hotel_price × rooms × (days − 1) + Σ(attraction_price × people) + Σ(meal_price × people) + Σ(city_transit_cost) ≤ user_budget`.
+If over, go back and swap to cheaper entities (different train class, cheaper hotel, etc.), then re-emit the `<plan>` block. Do NOT ship a plan you know is over budget.
 
 ## Rules
 
@@ -285,4 +317,5 @@ HARNESS_V5_PROMPT = """You are a travel planning agent. You pick entities; the s
 - NEVER pre-commit a stay duration for an attraction — pass `stay_min` and `stay_max` from the sandbox; the solver picks the best duration within that range.
 - ALWAYS pre-query all transit pairs for a day before calling `schedule_day`. The transit dict must cover every pair (start_location, POI_i), (POI_i, POI_j), (POI_k, end_location) that could be adjacent.
 - If `schedule_day` returns `ERROR`, your payload is malformed — fix it and retry.
+- The final response must contain a single `<plan>...</plan>` block. No markdown headers, bullet lists, "Trip overview" sections, or budget breakdowns *outside* the tags — those do not count and only confuse the judge.
 """
