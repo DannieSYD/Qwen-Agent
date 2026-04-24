@@ -109,27 +109,6 @@ RUN_SOLVER_SCHEMA_V3 = {
     }
 }
 
-# v4 schema: fixed CP-SAT template, returns entity selection for LLM to arrange
-RUN_SOLVER_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "run_solver",
-        "description": (
-            "Run the CP-SAT optimizer to SELECT entities for your travel plan. "
-            "Automatically reads all Working Memory data (transport, hotels, "
-            "attractions, restaurants, routes) and extracted constraints. Returns "
-            "the selected entities — you then arrange them into a day-by-day plan. "
-            "No arguments needed — just call this when you have gathered enough data. "
-            "If it returns feedback about missing data, query that data and call again."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    }
-}
-
 SCHEDULE_DAY_SCHEMA = {
     "type": "function",
     "function": {
@@ -166,86 +145,6 @@ SCHEDULE_DAY_SCHEMA = {
         },
     },
 }
-
-RESOLVE_CONSTRAINT_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "resolve_constraint",
-        "description": (
-            "Resolve a fuzzy constraint by mapping the user's term to the actual "
-            "database value. Use this when run_solver reports SOLVER_FUZZY_UNRESOLVED "
-            "and shows available values. For example, if the user said 'birthday set "
-            "menu' but the database has 'Birthday Package', call this to map it. "
-            "After resolving all fuzzy constraints, call run_solver again."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "variable": {
-                    "type": "string",
-                    "description": "The constraint variable (e.g., 'restaurant.tag', 'hotel.service')"
-                },
-                "original_value": {
-                    "type": "string",
-                    "description": "The original value from the constraint that had no match"
-                },
-                "resolved_value": {
-                    "type": "string",
-                    "description": "The database value that best matches the user's intent"
-                }
-            },
-            "required": ["variable", "original_value", "resolved_value"]
-        }
-    }
-}
-
-ASSEMBLE_DAY_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "assemble_day",
-        "description": (
-            "Build a fully-formatted day plan with correct timestamps, travel times, "
-            "distances, and costs. You specify the sequence of activities; the tool "
-            "computes all times deterministically from working memory data. "
-            "Auto-inserts travel_city segments between locations. "
-            "Returns formatted day text or errors if data is missing."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "day": {"type": "integer", "description": "Day number (1-indexed)"},
-                "current_city": {"type": "string", "description": "e.g. 'from Shanghai to Beijing' or 'Beijing'"},
-                "accommodation": {"type": "string", "description": "Hotel name from memory, or '-' for departure day"},
-                "accommodation_price": {"type": "string", "description": "e.g. '¥200/room/night', or '-'"},
-                "activities": {
-                    "type": "array",
-                    "description": "Ordered list of activities for the day",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "type": {
-                                "type": "string",
-                                "enum": ["intercity", "attraction", "meal", "hotel", "buffer"],
-                                "description": "Activity type"
-                            },
-                            "transport_type": {"type": "string", "enum": ["train", "flight"], "description": "For intercity: train or flight"},
-                            "id": {"type": "string", "description": "For intercity: train/flight number (e.g. 'G7798')"},
-                            "name": {"type": "string", "description": "For attraction: exact name from memory"},
-                            "meal_type": {"type": "string", "enum": ["Lunch", "Dinner"], "description": "For meal: Lunch or Dinner"},
-                            "restaurant": {"type": "string", "description": "For meal: exact restaurant name from memory"},
-                            "action": {"type": "string", "enum": ["Check-in", "Check-out", "Rest"], "description": "For hotel activity"},
-                            "description": {"type": "string", "description": "For buffer: description text"},
-                            "duration_min": {"type": "integer", "description": "For buffer/hotel/meal: duration in minutes"}
-                        },
-                        "required": ["type"]
-                    }
-                }
-            },
-            "required": ["day", "current_city", "accommodation", "activities"]
-        }
-    }
-}
-
 
 class ToolsFnAgent:
     """
@@ -892,7 +791,6 @@ class ToolsFnAgent:
             max_llm_calls: int = 100,
             enable_memory: bool = False,
             compact_outputs: bool = False,
-            extracted_constraints: Optional[tuple] = None,
             enable_solver: bool = False,
             solver_version: str = 'v3') -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """
@@ -906,11 +804,8 @@ class ToolsFnAgent:
                            with structured summaries + accumulated memory snapshot
             compact_outputs: If True, strip coordinates and non-essential fields from
                            tool outputs before passing to the model (harness_v1)
-            extracted_constraints: Optional (trip_meta, constraints, rendered_str) tuple
-                           from Phase 1 constraint extraction. If provided, stored in
-                           working memory and rendered in the memory snapshot.
-            enable_solver: If True, add run_solver tool
-            solver_version: 'v3' (LLM writes code), 'v4' (fixed CP-SAT template), or 'v5' (intra-day CP-SAT scheduler)
+            enable_solver: If True, add run_solver / schedule_day tool
+            solver_version: 'v3' (LLM writes code) or 'v5' (intra-day CP-SAT scheduler)
 
         Returns:
             (final_plan, messages, token_usage): Final plan, complete message history, and token usage
@@ -924,48 +819,22 @@ class ToolsFnAgent:
                 from agent.working_memory import WorkingMemory
             memory = WorkingMemory(language=self.language)
 
-            # Phase 1: Store extracted constraints in working memory
-            if extracted_constraints is not None:
-                trip_meta, constraints, rendered = extracted_constraints
-                memory.set_constraints(trip_meta, constraints, rendered)
-
         # When memory is enabled, add extra tools based on solver version.
-        # v4: run_solver + resolve_constraint (no assemble_day — LLM arranges plan)
-        # v3: run_solver + assemble_day
-        # no solver: assemble_day only
+        # v5: schedule_day (intra-day CP-SAT scheduler)
+        # v3: run_solver (LLM-generated code)
         tools_for_llm = self.openai_tools
-        if enable_memory:
+        if enable_memory and enable_solver:
             extra_tools = []
-            if enable_solver:
-                if solver_version == 'v5':
-                    extra_tools.append(SCHEDULE_DAY_SCHEMA)
-                elif solver_version == 'v4':
-                    extra_tools.append(RUN_SOLVER_SCHEMA)
-                    extra_tools.append(RESOLVE_CONSTRAINT_SCHEMA)
-                else:
-                    extra_tools.append(RUN_SOLVER_SCHEMA_V3)
-                    extra_tools.append(ASSEMBLE_DAY_SCHEMA)
+            if solver_version == 'v5':
+                extra_tools.append(SCHEDULE_DAY_SCHEMA)
             else:
-                extra_tools.append(ASSEMBLE_DAY_SCHEMA)
+                extra_tools.append(RUN_SOLVER_SCHEMA_V3)
             tools_for_llm = self.openai_tools + extra_tools
 
         messages: List[Dict[str, Any]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": user_query})
-
-        # Inject extracted constraints so the LLM sees them before the first tool call
-        if memory and memory._constraints_rendered:
-            messages.append({
-                "role": "user",
-                "content": (
-                    "Before you start querying, here are the extracted constraints "
-                    "from the user's request. Use these to guide your tool calls "
-                    "(e.g., filter hotels by star rating, find restaurants near "
-                    "specific locations, pick the right transport mode).\n\n"
-                    + memory.render_snapshot()
-                ),
-            })
 
         total_prompt_tokens = 0
         total_completion_tokens = 0
@@ -974,9 +843,6 @@ class ToolsFnAgent:
         solver_was_called = False  # Track whether run_solver has been invoked
         solver_succeeded = False  # Track whether run_solver returned a valid plan
         solver_nudge_count = 0  # Limit how many times we nudge for solver usage
-        solver_result_obj = None  # SolverResult for faithfulness checking (v4)
-        solver_data_obj = None   # Solver data dict for faithfulness checking (v4)
-        faithfulness_retries = 0  # Track faithfulness correction rounds
 
         llm_budget = max_llm_calls
 
@@ -1009,75 +875,6 @@ class ToolsFnAgent:
             if calls:
                 # Execute tool calls
                 for call in calls:
-                    # --- Special handling: assemble_day is a memory-side tool ---
-                    if call['name'] == 'assemble_day' and memory:
-                        try:
-                            args = json.loads(call['arguments']) if call['arguments'] else {}
-                        except json.JSONDecodeError:
-                            args = {}
-                        tool_content = memory.assemble_day(args)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": call['id'],
-                            "name": call['name'],
-                            "content": tool_content,
-                        })
-                        continue
-
-                    # --- Special handling: resolve_constraint updates a constraint value ---
-                    if call['name'] == 'resolve_constraint' and memory:
-                        try:
-                            args = json.loads(call['arguments']) if call['arguments'] else {}
-                        except json.JSONDecodeError:
-                            args = {}
-                        variable = args.get('variable', '')
-                        original = args.get('original_value', '')
-                        resolved = args.get('resolved_value', '')
-                        # Update the constraint in memory
-                        # Try exact match first, then fuzzy match on original_value
-                        updated_list = []
-                        original_lower = str(original).lower()
-                        for c in memory.constraints:
-                            if c.variable != variable:
-                                continue
-                            c_val = str(c.value).lower()
-                            if c_val == original_lower:
-                                # Exact match
-                                c.value = resolved
-                                updated_list.append(c_val)
-                                break
-                        if not updated_list:
-                            # Fuzzy match: resolve ALL constraints with this variable
-                            # whose value is a substring of original or vice versa
-                            # (handles "washing machine and dryer" matching both
-                            #  "washing machine" and "dryer" separately)
-                            for c in memory.constraints:
-                                if c.variable != variable:
-                                    continue
-                                c_val = str(c.value).lower()
-                                if c_val in original_lower or original_lower in c_val:
-                                    old_val = c.value
-                                    c.value = resolved
-                                    updated_list.append(old_val)
-                        if updated_list:
-                            tool_content = (
-                                f"Constraint(s) updated: {variable} value(s) "
-                                f"{updated_list} → '{resolved}'. Call run_solver again."
-                            )
-                        else:
-                            tool_content = (
-                                f"No constraint found with variable='{variable}' and "
-                                f"value='{original}'. Available constraints: "
-                                + ", ".join(f"{c.variable}={c.value}" for c in memory.constraints)
-                            )
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": call['id'],
-                            "name": call['name'],
-                            "content": tool_content,
-                        })
-                        continue
-
                     # --- Special handling: schedule_day (v5 intra-day scheduler) ---
                     if call['name'] == 'schedule_day':
                         try:
@@ -1102,7 +899,7 @@ class ToolsFnAgent:
                         })
                         continue
 
-                    # --- Special handling: run_solver ---
+                    # --- Special handling: run_solver (v3: LLM-generated code) ---
                     if call['name'] == 'run_solver' and memory:
                         solver_was_called = True
                         try:
@@ -1111,77 +908,39 @@ class ToolsFnAgent:
                             from agent.solver.data_export import export_memory_as_dict
                         solver_data = export_memory_as_dict(memory)
 
-                        if solver_version == 'v4':
-                            # v4: CP-SAT selects entities, LLM arranges them
-                            try:
-                                from solver.cp_template import CPSATEntitySelector
-                                from solver.executor import format_solver_selection
-                            except ImportError:
-                                from agent.solver.cp_template import CPSATEntitySelector
-                                from agent.solver.executor import format_solver_selection
+                        try:
+                            args = json.loads(call['arguments']) if call['arguments'] else {}
+                        except json.JSONDecodeError:
+                            args = {}
+                        try:
+                            from solver.executor import run_solver_code
+                        except ImportError:
+                            from agent.solver.executor import run_solver_code
+                        tool_content = run_solver_code(
+                            code=args.get('code', ''),
+                            data=solver_data,
+                        )
 
-                            selector = CPSATEntitySelector(solver_data)
-                            sel_result = selector.solve()
-
-                            _FAIL_STATUSES = ("MISSING_DATA", "INFEASIBLE", "ERROR")
-                            if sel_result.status in _FAIL_STATUSES:
-                                tool_content = sel_result.feedback
-                            elif sel_result.feedback and "SOLVER_FUZZY_UNRESOLVED" in sel_result.feedback:
-                                tool_content = sel_result.feedback
-                            else:
-                                # Solver succeeded — format selection for LLM
-                                tool_content = format_solver_selection(sel_result, solver_data)
-                                solver_result_obj = sel_result
-                                solver_data_obj = solver_data
-                                solver_succeeded = True
-                        else:
-                            # v3: LLM-generated code
-                            try:
-                                args = json.loads(call['arguments']) if call['arguments'] else {}
-                            except json.JSONDecodeError:
-                                args = {}
-                            try:
-                                from solver.executor import run_solver_code
-                            except ImportError:
-                                from agent.solver.executor import run_solver_code
-                            tool_content = run_solver_code(
-                                code=args.get('code', ''),
-                                data=solver_data,
-                            )
-
-                        if solver_version == 'v4':
-                            # v4: selection or feedback — either way, pass to LLM
-                            # and let it continue (write plan or query more data)
-                            # Working memory is already visible via regular tool responses;
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": call['id'],
-                                "name": call['name'],
-                                "content": tool_content,
-                            })
-                            continue
-                        else:
-                            # v3: old behavior — return plan directly on success
-                            data_summary = _data_summary_for_model(solver_data)
-                            _SOLVER_FAIL_PREFIXES = ('SOLVER_ERROR', 'SOLVER_INFEASIBLE', 'SOLVER_FEEDBACK', 'SOLVER_FUZZY_UNRESOLVED')
-                            solver_succeeded = not any(tool_content.startswith(p) for p in _SOLVER_FAIL_PREFIXES)
-                            if solver_succeeded:
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": call['id'],
-                                    "name": call['name'],
-                                    "content": data_summary + tool_content,
-                                })
-                                token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
-                                return tool_content, messages, token_usage, memory
-
+                        data_summary = _data_summary_for_model(solver_data)
+                        _SOLVER_FAIL_PREFIXES = ('SOLVER_ERROR', 'SOLVER_INFEASIBLE', 'SOLVER_FEEDBACK', 'SOLVER_FUZZY_UNRESOLVED')
+                        solver_succeeded = not any(tool_content.startswith(p) for p in _SOLVER_FAIL_PREFIXES)
+                        if solver_succeeded:
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": call['id'],
                                 "name": call['name'],
                                 "content": data_summary + tool_content,
                             })
-                            continue
+                            token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
+                            return tool_content, messages, token_usage, memory
+
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call['id'],
+                            "name": call['name'],
+                            "content": data_summary + tool_content,
+                        })
+                        continue
 
                     tool_result = self._exec_tool(call['name'], call['arguments'])
 
@@ -1241,18 +1000,6 @@ class ToolsFnAgent:
                             "final plan yourself. Call `schedule_day` now."
                         ),
                     })
-                elif solver_version == 'v4':
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "REJECTED: You wrote the plan manually. You MUST call `run_solver` (no arguments).\n\n"
-                            "If `run_solver` returned SOLVER_FEEDBACK about missing data, query that data first, "
-                            "then call `run_solver` again.\n"
-                            "If it returned SOLVER_FUZZY_UNRESOLVED, call `resolve_constraint` to map fuzzy "
-                            "values, then call `run_solver` again.\n\n"
-                            "Do NOT write plans manually. Call `run_solver` now."
-                        ),
-                    })
                 else:
                     messages.append({
                         "role": "user",
@@ -1278,18 +1025,6 @@ class ToolsFnAgent:
                 continue
 
             if final_content:
-                # v4 faithfulness check: ensure all solver-selected entities appear
-                if solver_version == 'v4' and solver_result_obj and faithfulness_retries < 2:
-                    try:
-                        from solver.executor import check_plan_faithfulness
-                    except ImportError:
-                        from agent.solver.executor import check_plan_faithfulness
-                    faith_feedback = check_plan_faithfulness(final_content, solver_result_obj, solver_data_obj)
-                    if faith_feedback and llm_budget > 0:
-                        faithfulness_retries += 1
-                        messages.append({"role": "user", "content": faith_feedback})
-                        continue
-
                 token_usage = {"prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens, "total_tokens": total_tokens}
                 return final_content, messages, token_usage, memory
 
@@ -1335,7 +1070,7 @@ class ToolsFnAgent:
             messages: Existing message history (will be mutated in-place)
             max_llm_calls: Maximum additional LLM calls
             compact_outputs: If True, strip coordinates from tool outputs
-            memory: Optional WorkingMemory instance for assemble_day support
+            memory: Optional WorkingMemory instance for solver data export
 
         Returns:
             (final_plan, messages, token_usage): Same as run()
@@ -1344,10 +1079,11 @@ class ToolsFnAgent:
         total_completion_tokens = 0
         total_tokens = 0
 
-        # Include assemble_day (and run_solver if available) when memory is present
+        # Continue-run is only used for non-v5 correction rounds; expose schedule_day
+        # (no-op if memory is v3-only) and run_solver for LLM-code execution.
         tools_for_llm = self.openai_tools
         if memory is not None:
-            extra_tools = [ASSEMBLE_DAY_SCHEMA, RUN_SOLVER_SCHEMA]
+            extra_tools = [SCHEDULE_DAY_SCHEMA, RUN_SOLVER_SCHEMA_V3]
             tools_for_llm = self.openai_tools + extra_tools
 
         llm_budget = max_llm_calls
@@ -1393,36 +1129,24 @@ class ToolsFnAgent:
                         })
                         continue
 
-                    # Handle assemble_day via memory (same as run())
-                    if call['name'] == 'assemble_day' and memory:
-                        try:
-                            args = json.loads(call['arguments']) if call['arguments'] else {}
-                        except json.JSONDecodeError:
-                            args = {}
-                        tool_content = memory.assemble_day(args)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": call['id'],
-                            "name": call['name'],
-                            "content": tool_content,
-                        })
-                        continue
-
-                    # Handle run_solver via solver executor (same as run())
+                    # Handle run_solver (v3: LLM-generated code) via solver executor
                     if call['name'] == 'run_solver' and memory:
                         try:
                             from solver.data_export import export_memory_as_dict
                         except ImportError:
                             from agent.solver.data_export import export_memory_as_dict
                         solver_data = export_memory_as_dict(memory)
-                        # Use v4 template in _finalize_plan context
                         try:
-                            from solver.executor import run_solver_template
+                            args = json.loads(call['arguments']) if call['arguments'] else {}
+                        except json.JSONDecodeError:
+                            args = {}
+                        try:
+                            from solver.executor import run_solver_code
                         except ImportError:
-                            from agent.solver.executor import run_solver_template
-                        tool_content = run_solver_template(
+                            from agent.solver.executor import run_solver_code
+                        tool_content = run_solver_code(
+                            code=args.get('code', ''),
                             data=solver_data,
-                            memory=memory,
                         )
                         data_summary = _data_summary_for_model(solver_data)
                         # Auto-extract successful solver output as final plan
@@ -1525,10 +1249,10 @@ def run_agent_inference(
     (output_dir / 'trajectories').mkdir(exist_ok=True)
     (output_dir / 'reports').mkdir(exist_ok=True)
 
-    # Load .env early so API keys are available for constraint extraction
+    # Load .env early so API keys are available for downstream LLM calls
     _load_dotenv_for_module()
 
-    _GUIDED_VARIANTS = ('guided', 'guided_memory', 'harness_v1', 'harness_v2', 'harness_v3', 'harness_v4', 'harness_v5')
+    _GUIDED_VARIANTS = ('guided', 'guided_memory', 'harness_v1', 'harness_v2', 'harness_v3', 'harness_v5')
 
     if prompt_variant in _GUIDED_VARIANTS:
         try:
@@ -1553,25 +1277,15 @@ def run_agent_inference(
         except ImportError:
             from agent.plan_validator import validate_plan, build_correction_message
 
-    # Phase 1: Import constraint extractor for harness_v2+ (NOT harness_v5 — v5 parses NL itself)
-    enable_constraint_extraction = (prompt_variant in ('harness_v2', 'harness_v3', 'harness_v4'))
-    if enable_constraint_extraction:
-        try:
-            from constraint_extractor import extract_constraints, render_constraints_for_prompt
-        except ImportError:
-            from agent.constraint_extractor import extract_constraints, render_constraints_for_prompt
-
     # Enable working memory for guided_memory, harness_v1+
-    enable_memory = (prompt_variant in ('guided_memory', 'harness_v1', 'harness_v2', 'harness_v3', 'harness_v4', 'harness_v5'))
+    enable_memory = (prompt_variant in ('guided_memory', 'harness_v1', 'harness_v2', 'harness_v3', 'harness_v5'))
     # Enable compact outputs for harness_v1+
-    compact_outputs = (prompt_variant in ('harness_v1', 'harness_v2', 'harness_v3', 'harness_v4', 'harness_v5'))
+    compact_outputs = (prompt_variant in ('harness_v1', 'harness_v2', 'harness_v3', 'harness_v5'))
     # Enable solver tool for harness_v3+
-    enable_solver = (prompt_variant in ('harness_v3', 'harness_v4', 'harness_v5'))
-    # Solver version: v5 = intra-day CP-SAT scheduler, v4 = fixed template, v3 = LLM writes code
+    enable_solver = (prompt_variant in ('harness_v3', 'harness_v5'))
+    # Solver version: v5 = intra-day CP-SAT scheduler, v3 = LLM writes code
     if prompt_variant == 'harness_v5':
         solver_version = 'v5'
-    elif prompt_variant == 'harness_v4':
-        solver_version = 'v4'
     else:
         solver_version = 'v3'
     
@@ -1597,24 +1311,11 @@ def run_agent_inference(
             
             if prompt_variant == 'harness_v5':
                 system_prompt = get_system_prompt(language, variant='solver_v5')
-            elif prompt_variant in ('harness_v3', 'harness_v4'):
-                system_prompt = get_system_prompt(language, variant='solver' if prompt_variant == 'harness_v3' else 'solver_v4')
+            elif prompt_variant == 'harness_v3':
+                system_prompt = get_system_prompt(language, variant='solver')
             else:
                 system_prompt = get_system_prompt(language)
             start_time = time.time()
-
-            # Phase 1: Extract constraints before running agent
-            extracted_constraints = None
-            if enable_constraint_extraction:
-                try:
-                    trip_meta, constraints = extract_constraints(query, model)
-                    rendered = render_constraints_for_prompt(trip_meta, constraints)
-                    extracted_constraints = (trip_meta, constraints, rendered)
-                    with print_lock:
-                        print(f"  📋 {sample_id}: Extracted {len(constraints)} constraints")
-                except Exception as e:
-                    with print_lock:
-                        print(f"  ⚠️  {sample_id}: Constraint extraction failed: {e}")
 
             final_plan, full_messages, token_usage, memory = agent.run(
                 user_query=query,
@@ -1622,14 +1323,13 @@ def run_agent_inference(
                 max_llm_calls=max_llm_calls,
                 enable_memory=enable_memory,
                 compact_outputs=compact_outputs,
-                extracted_constraints=extracted_constraints,
                 enable_solver=enable_solver,
                 solver_version=solver_version,
             )
 
             # Validation loop for guided variants (max 2 correction rounds)
-            # Skip for harness_v4/v5: faithfulness check is built into the main run() loop
-            if prompt_variant in _GUIDED_VARIANTS and prompt_variant not in ('harness_v4', 'harness_v5') and final_plan and final_plan != "Reached max LLM calls without final answer.":
+            # Skip for harness_v5: faithfulness check is built into the main run() loop
+            if prompt_variant in _GUIDED_VARIANTS and prompt_variant != 'harness_v5' and final_plan and final_plan != "Reached max LLM calls without final answer.":
                 max_corrections = 2
                 for correction_round in range(max_corrections):
                     serialized_for_validation = agent._serialize_messages(full_messages)

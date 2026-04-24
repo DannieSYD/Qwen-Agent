@@ -209,61 +209,6 @@ Always read data from the pre-loaded `data` dict — do NOT hardcode values.
 _SOLVER_GUIDANCE_ZH = _SOLVER_GUIDANCE_EN  # Use English guidance for now
 
 
-# ============================================================================
-# v4: Simplified solver guidance (fixed template, no LLM code)
-# ============================================================================
-
-_SOLVER_V4_GUIDANCE_EN = """
-
-================================================================
-MANDATORY: USE run_solver + ARRANGE THE PLAN YOURSELF
-================================================================
-The solver selects WHICH entities to use (transport, hotel, attractions, restaurants)
-via constraint optimization. YOUR job is to arrange them into a sensible day-by-day plan.
-
-**Workflow:**
-1. Gather ALL data first:
-   - Outbound transport: query flights/trains for departure date
-   - Inbound transport: query flights/trains for return date
-   - Hotels: query hotels in destination city
-   - Attractions: use recommend_attractions, then query_attraction_details for each
-   - Restaurants: use recommend_restaurants near planned locations
-   - Routes are computed automatically between known locations
-
-2. Call `run_solver` — no code, no arguments. Just call it.
-3. If SOLVER_FEEDBACK says data is missing → query that data, then call `run_solver` again.
-4. If SOLVER_INFEASIBLE → query more options, then call `run_solver` again.
-5. If SOLVER_FUZZY_UNRESOLVED → use `resolve_constraint` to map fuzzy values, then call again.
-6. When `run_solver` returns SOLVER_SELECTION:
-   - You receive the exact entities the solver picked (transport, hotel, attractions, restaurants)
-   - You receive routes/travel times between locations
-   - **You MUST use ALL of them** — do not add, remove, or swap any entity
-   - Arrange them into a day-by-day plan using your judgment for:
-     • Activity ordering (nearby attractions together, minimize travel)
-     • Meal timing (lunch ~11:00-14:00, dinner ~17:00-21:00, gap ≥2 hours)
-     • Buffer time after train/flight arrival (luggage, transit to hotel)
-     • Check-in/check-out at the hotel
-     • Realistic visit durations within the given min-max range
-     • Pacing (don't cram too many activities, leave breathing room)
-   - Include travel_city segments between locations with duration, distance, and cost
-   - End with a Budget Summary
-   - Output the final plan in <plan>...</plan> tags
-
-**Tips for data gathering:**
-- Query transport in BOTH directions (outbound AND inbound)
-- After recommend_attractions, call query_attraction_details for each attraction
-- After querying hotels, use recommend_restaurants near attractions or near the hotel
-- The more data you gather, the better the solver can optimize
-
-⚠️ You MUST call `run_solver` before writing a plan. Plans without solver selection will be REJECTED.
-⚠️ You MUST include EVERY entity from the solver selection. Missing entities will be flagged.
-⚠️ DO NOT call `assemble_day` — arrange the plan yourself using the solver's entity selection.
-
-"""
-
-_SOLVER_V4_GUIDANCE_ZH = _SOLVER_V4_GUIDANCE_EN  # Use English guidance for now
-
-
 # Build solver-enabled prompt: replace the assemble_day guidance with solver guidance
 def _build_solver_prompt(base: str, solver_guidance: str) -> str:
     """Replace the PLAN ASSEMBLY (assemble_day) block with solver guidance."""
@@ -284,22 +229,16 @@ def _build_solver_prompt(base: str, solver_guidance: str) -> str:
 SYSTEM_PROMPT_SOLVER_EN = _build_solver_prompt(SYSTEM_PROMPT_EN, _SOLVER_GUIDANCE_EN)
 SYSTEM_PROMPT_SOLVER_ZH = _build_solver_prompt(SYSTEM_PROMPT_ZH, _SOLVER_GUIDANCE_ZH)
 
-# v4: fixed template solver
-SYSTEM_PROMPT_SOLVER_V4_EN = _build_solver_prompt(SYSTEM_PROMPT_EN, _SOLVER_V4_GUIDANCE_EN)
-SYSTEM_PROMPT_SOLVER_V4_ZH = _build_solver_prompt(SYSTEM_PROMPT_ZH, _SOLVER_V4_GUIDANCE_ZH)
-
 
 def get_system_prompt(language: str = 'zh', variant: str = 'guided') -> str:
     """Get guided system prompt based on language and variant.
 
     Args:
         language: 'zh' or 'en'
-        variant: 'guided' | 'solver' (harness_v3) | 'solver_v4' (harness_v4) | 'solver_v5' (harness_v5)
+        variant: 'guided' | 'solver' (harness_v3) | 'solver_v5' (harness_v5)
     """
     if variant == 'solver_v5':
         return HARNESS_V5_PROMPT
-    if variant == 'solver_v4':
-        return SYSTEM_PROMPT_SOLVER_V4_EN if language == 'en' else SYSTEM_PROMPT_SOLVER_V4_ZH
     if variant == 'solver':
         return SYSTEM_PROMPT_SOLVER_EN if language == 'en' else SYSTEM_PROMPT_SOLVER_ZH
     if language == 'zh':
