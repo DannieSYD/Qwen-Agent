@@ -1084,9 +1084,8 @@ class ToolsFnAgent:
                             from agent.solver.day_scheduler import schedule_day
                         payload = call['arguments'].get('payload', {})
                         if isinstance(payload, str):
-                            import json as _json
                             try:
-                                payload = _json.loads(payload)
+                                payload = json.loads(payload)
                             except Exception:
                                 pass
                         result = schedule_day(payload)
@@ -1365,9 +1364,8 @@ class ToolsFnAgent:
                             from agent.solver.day_scheduler import schedule_day
                         payload = call['arguments'].get('payload', {})
                         if isinstance(payload, str):
-                            import json as _json
                             try:
-                                payload = _json.loads(payload)
+                                payload = json.loads(payload)
                             except Exception:
                                 pass
                         result = schedule_day(payload)
