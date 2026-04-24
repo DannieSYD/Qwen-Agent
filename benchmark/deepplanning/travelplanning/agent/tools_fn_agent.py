@@ -130,6 +130,43 @@ RUN_SOLVER_SCHEMA = {
     }
 }
 
+SCHEDULE_DAY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "schedule_day",
+        "description": (
+            "Given a set of entities already selected for a specific day "
+            "(attractions, optionally a lunch and dinner restaurant, plus "
+            "transit times between every pair of them), return a timed "
+            "schedule with correct ordering, business-hour compliance, "
+            "meal-window compliance, and transit/buffer insertion. "
+            "Call once per day of the trip. "
+            "If the response is INFEASIBLE, read unsat_core, adjust your "
+            "selection (e.g., re-assign a day, swap a restaurant, pick a "
+            "later inbound train), and call again. Limit 3 retries per day."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "description": (
+                        "See spec 2026-04-24-scheduling-model-design.md section 5 for full schema. "
+                        "Required keys: day_index (int), weekday (str), "
+                        "arrival (object|null), departure (object|null), "
+                        "start_location (str), end_location (str), "
+                        "attractions (list of POI objects), "
+                        "lunch_restaurant (object|null), dinner_restaurant (object|null), "
+                        "transits (object mapping \"('A', 'B')\" string keys to "
+                        "{duration_min: int})."
+                    ),
+                },
+            },
+            "required": ["payload"],
+        },
+    },
+}
+
 RESOLVE_CONSTRAINT_SCHEMA = {
     "type": "function",
     "function": {
@@ -1039,6 +1076,28 @@ class ToolsFnAgent:
                         })
                         continue
 
+                    # --- Special handling: schedule_day (v5 intra-day scheduler) ---
+                    if call['name'] == 'schedule_day':
+                        try:
+                            from solver.day_scheduler import schedule_day
+                        except ImportError:
+                            from agent.solver.day_scheduler import schedule_day
+                        payload = call['arguments'].get('payload', {})
+                        if isinstance(payload, str):
+                            import json as _json
+                            try:
+                                payload = _json.loads(payload)
+                            except Exception:
+                                pass
+                        result = schedule_day(payload)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call['id'],
+                            "name": call['name'],
+                            "content": json.dumps(result, ensure_ascii=False),
+                        })
+                        continue
+
                     # --- Special handling: run_solver ---
                     if call['name'] == 'run_solver' and memory:
                         solver_was_called = True
@@ -1298,6 +1357,28 @@ class ToolsFnAgent:
             messages.append(msg)
             if calls:
                 for call in calls:
+                    # --- Special handling: schedule_day (v5 intra-day scheduler) ---
+                    if call['name'] == 'schedule_day':
+                        try:
+                            from solver.day_scheduler import schedule_day
+                        except ImportError:
+                            from agent.solver.day_scheduler import schedule_day
+                        payload = call['arguments'].get('payload', {})
+                        if isinstance(payload, str):
+                            import json as _json
+                            try:
+                                payload = _json.loads(payload)
+                            except Exception:
+                                pass
+                        result = schedule_day(payload)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call['id'],
+                            "name": call['name'],
+                            "content": json.dumps(result, ensure_ascii=False),
+                        })
+                        continue
+
                     # Handle assemble_day via memory (same as run())
                     if call['name'] == 'assemble_day' and memory:
                         try:
