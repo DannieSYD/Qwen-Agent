@@ -1039,8 +1039,18 @@ class ToolsFnAgent:
             # Empty plan — nudge the model
             empty_plan_retries += 1
             if empty_plan_retries <= 2 and llm_budget > 0:
-                if enable_solver and not solver_was_called:
-                    # Solver mode: nudge to call run_solver, not write manually
+                if enable_solver and solver_version == 'v5' and not solver_was_called:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "You have not called `schedule_day` yet. Do not write a plan manually. "
+                            "For each day of the trip, call `schedule_day(payload)` with the chosen "
+                            "entities, the day_index, and the transit dict. After all days are "
+                            "scheduled, output the final plan in <plan>...</plan> tags."
+                        ),
+                    })
+                elif enable_solver and solver_version == 'v3' and not solver_was_called:
+                    # v3 (LLM-generated CP-SAT code): nudge to call run_solver
                     messages.append({
                         "role": "user",
                         "content": (
