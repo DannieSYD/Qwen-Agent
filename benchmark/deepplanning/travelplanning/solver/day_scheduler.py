@@ -49,6 +49,8 @@ def _schedule_day_impl(payload: dict[str, Any]) -> dict[str, Any]:
     builder.add_ordering_and_transit(payload.get("transits", {}))
     builder.add_no_overlap()
     builder.add_meal_constraints(payload)
+    builder.add_arrival_anchor(payload)
+    builder.add_departure_anchor(payload)
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = DEFAULT_TIME_LIMIT_S
@@ -179,6 +181,45 @@ class _ModelBuilder:
             self.model.Add(dinner_start - lunch_end >= MIN_MEAL_GAP_MIN).OnlyEnforceIf(lit)
             self.model.AddAssumption(lit)
             self._labels.append((lit, f"meal_gap >= {MIN_MEAL_GAP_MIN}min"))
+
+    def add_arrival_anchor(self, payload: dict[str, Any]) -> None:
+        """Day 1: every activity's start must be >= arrival + exit_buffer + transit(station, i).
+        Imposing unconditionally gives the tightest bound on whichever activity ends up first;
+        for non-first activities, the precedence chain provides a tighter bound anyway.
+        """
+        arrival = payload.get("arrival")
+        if not arrival:
+            return
+        arrival_time = _parse_hhmm(arrival["time"])
+        station = arrival["station_poi"]
+        earliest_anywhere = arrival_time + STATION_EXIT_BUFFER_MIN
+        transits = payload.get("transits", {})
+        for a in self._activities:
+            key = f"('{station}', '{a.id}')"
+            tau = int(transits.get(key, {}).get("duration_min", 0))
+            start = self._vars[a.id][0]
+            lit = self.model.NewBoolVar(f"arrival_bound_{a.id}")
+            self.model.Add(start >= earliest_anywhere + tau).OnlyEnforceIf(lit)
+            self.model.AddAssumption(lit)
+            self._labels.append((lit, f"arrival({arrival['time']}) + exit_buffer + transit -> {a.name}"))
+
+    def add_departure_anchor(self, payload: dict[str, Any]) -> None:
+        """Day D: every activity's end + transit(i, station) + entry_buffer <= departure."""
+        departure = payload.get("departure")
+        if not departure:
+            return
+        dep_time = _parse_hhmm(departure["time"])
+        station = departure["station_poi"]
+        latest_anywhere = dep_time - STATION_ENTRY_BUFFER_MIN
+        transits = payload.get("transits", {})
+        for a in self._activities:
+            key = f"('{a.id}', '{station}')"
+            tau = int(transits.get(key, {}).get("duration_min", 0))
+            end = self._vars[a.id][1]
+            lit = self.model.NewBoolVar(f"departure_bound_{a.id}")
+            self.model.Add(end + tau <= latest_anywhere).OnlyEnforceIf(lit)
+            self.model.AddAssumption(lit)
+            self._labels.append((lit, f"{a.name} + transit + entry_buffer -> departure({departure['time']})"))
 
     def add_ordering_and_transit(self, transits: dict[str, dict]) -> None:
         """For each ordered pair (i, j) of activities, create next_ij boolean.

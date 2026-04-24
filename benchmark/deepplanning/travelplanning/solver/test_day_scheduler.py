@@ -149,3 +149,40 @@ def test_lunch_and_dinner_in_windows_with_gap():
     assert 11 * 60 + 30 <= lunch_start <= 13 * 60 + 30
     assert 17 * 60 <= dinner_start <= 20 * 60 + 30
     assert dinner_start - lunch_end >= 120
+
+
+def test_arrival_anchor_bounds_first_activity():
+    payload = _minimal_payload()
+    payload["arrival"] = {"time": "09:00", "station_poi": "STN"}
+    payload["start_location"] = "STN"
+    payload["attractions"] = [
+        {"poi_id": "A1", "name": "POI", "open": "08:00", "close": "18:00",
+         "stay_min": 60, "stay_max": 60},
+    ]
+    payload["transits"] = {
+        "('STN', 'A1')": {"duration_min": 20},
+        "('A1', 'STN')": {"duration_min": 20},
+    }
+    result = schedule_day(payload)
+    assert result["status"] == "FEASIBLE"
+    attr = next(e for e in result["schedule"] if e["type"] == "attraction")
+    # arrival 09:00 + STATION_EXIT_BUFFER_MIN (5) + transit 20 = 09:25 minimum
+    assert _hhmm_to_min(attr["start"]) >= 9 * 60 + 25
+
+
+def test_departure_anchor_forces_infeasibility_when_too_tight():
+    payload = _minimal_payload()
+    payload["departure"] = {"time": "12:00", "station_poi": "STN"}
+    payload["end_location"] = "STN"
+    payload["attractions"] = [
+        {"poi_id": "A1", "name": "POI", "open": "10:00", "close": "18:00",
+         "stay_min": 120, "stay_max": 120},
+    ]
+    payload["transits"] = {
+        "('HOTEL', 'A1')": {"duration_min": 10},
+        "('A1', 'STN')": {"duration_min": 30},
+    }
+    # POI requires 120min + 30min transit + 20min station buffer = 170min
+    # Even starting at open (10:00), end of chain is 10:00 + 120 + 30 + 20 = 13:10 > 12:00
+    result = schedule_day(payload)
+    assert result["status"] == "INFEASIBLE"
