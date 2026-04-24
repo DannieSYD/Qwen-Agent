@@ -937,11 +937,13 @@ class ToolsFnAgent:
         if enable_memory:
             extra_tools = []
             if enable_solver:
-                schema = RUN_SOLVER_SCHEMA if solver_version == 'v4' else RUN_SOLVER_SCHEMA_V3
-                extra_tools.append(schema)
-                if solver_version == 'v4':
+                if solver_version == 'v5':
+                    extra_tools.append(SCHEDULE_DAY_SCHEMA)
+                elif solver_version == 'v4':
+                    extra_tools.append(RUN_SOLVER_SCHEMA)
                     extra_tools.append(RESOLVE_CONSTRAINT_SCHEMA)
                 else:
+                    extra_tools.append(RUN_SOLVER_SCHEMA_V3)
                     extra_tools.append(ASSEMBLE_DAY_SCHEMA)
             else:
                 extra_tools.append(ASSEMBLE_DAY_SCHEMA)
@@ -1512,7 +1514,7 @@ def run_agent_inference(
     # Load .env early so API keys are available for constraint extraction
     _load_dotenv_for_module()
 
-    _GUIDED_VARIANTS = ('guided', 'guided_memory', 'harness_v1', 'harness_v2', 'harness_v3', 'harness_v4')
+    _GUIDED_VARIANTS = ('guided', 'guided_memory', 'harness_v1', 'harness_v2', 'harness_v3', 'harness_v4', 'harness_v5')
 
     if prompt_variant in _GUIDED_VARIANTS:
         try:
@@ -1537,7 +1539,7 @@ def run_agent_inference(
         except ImportError:
             from agent.plan_validator import validate_plan, build_correction_message
 
-    # Phase 1: Import constraint extractor for harness_v2+
+    # Phase 1: Import constraint extractor for harness_v2+ (NOT harness_v5 — v5 parses NL itself)
     enable_constraint_extraction = (prompt_variant in ('harness_v2', 'harness_v3', 'harness_v4'))
     if enable_constraint_extraction:
         try:
@@ -1546,13 +1548,18 @@ def run_agent_inference(
             from agent.constraint_extractor import extract_constraints, render_constraints_for_prompt
 
     # Enable working memory for guided_memory, harness_v1+
-    enable_memory = (prompt_variant in ('guided_memory', 'harness_v1', 'harness_v2', 'harness_v3', 'harness_v4'))
+    enable_memory = (prompt_variant in ('guided_memory', 'harness_v1', 'harness_v2', 'harness_v3', 'harness_v4', 'harness_v5'))
     # Enable compact outputs for harness_v1+
-    compact_outputs = (prompt_variant in ('harness_v1', 'harness_v2', 'harness_v3', 'harness_v4'))
+    compact_outputs = (prompt_variant in ('harness_v1', 'harness_v2', 'harness_v3', 'harness_v4', 'harness_v5'))
     # Enable solver tool for harness_v3+
-    enable_solver = (prompt_variant in ('harness_v3', 'harness_v4'))
-    # Solver version: v3 = LLM writes code, v4 = fixed template
-    solver_version = 'v4' if prompt_variant == 'harness_v4' else 'v3'
+    enable_solver = (prompt_variant in ('harness_v3', 'harness_v4', 'harness_v5'))
+    # Solver version: v5 = intra-day CP-SAT scheduler, v4 = fixed template, v3 = LLM writes code
+    if prompt_variant == 'harness_v5':
+        solver_version = 'v5'
+    elif prompt_variant == 'harness_v4':
+        solver_version = 'v4'
+    else:
+        solver_version = 'v3'
     
     print_lock = Lock()
     results = []
@@ -1574,7 +1581,9 @@ def run_agent_inference(
                 language=language
             )
             
-            if prompt_variant in ('harness_v3', 'harness_v4'):
+            if prompt_variant == 'harness_v5':
+                system_prompt = get_system_prompt(language, variant='solver_v5')
+            elif prompt_variant in ('harness_v3', 'harness_v4'):
                 system_prompt = get_system_prompt(language, variant='solver' if prompt_variant == 'harness_v3' else 'solver_v4')
             else:
                 system_prompt = get_system_prompt(language)
@@ -1605,8 +1614,8 @@ def run_agent_inference(
             )
 
             # Validation loop for guided variants (max 2 correction rounds)
-            # Skip for harness_v4: faithfulness check is built into the main run() loop
-            if prompt_variant in _GUIDED_VARIANTS and prompt_variant != 'harness_v4' and final_plan and final_plan != "Reached max LLM calls without final answer.":
+            # Skip for harness_v4/v5: faithfulness check is built into the main run() loop
+            if prompt_variant in _GUIDED_VARIANTS and prompt_variant not in ('harness_v4', 'harness_v5') and final_plan and final_plan != "Reached max LLM calls without final answer.":
                 max_corrections = 2
                 for correction_round in range(max_corrections):
                     serialized_for_validation = agent._serialize_messages(full_messages)
