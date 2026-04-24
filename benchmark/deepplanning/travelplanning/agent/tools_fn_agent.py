@@ -881,7 +881,15 @@ class ToolsFnAgent:
                             from solver.day_scheduler import schedule_day
                         except ImportError:
                             from agent.solver.day_scheduler import schedule_day
-                        payload = call['arguments'].get('payload', {})
+                        raw_args = call['arguments']
+                        if isinstance(raw_args, str):
+                            try:
+                                args = json.loads(raw_args) if raw_args else {}
+                            except Exception:
+                                args = {}
+                        else:
+                            args = raw_args or {}
+                        payload = args.get('payload', {}) if isinstance(args, dict) else {}
                         if isinstance(payload, str):
                             try:
                                 payload = json.loads(payload)
@@ -1114,7 +1122,15 @@ class ToolsFnAgent:
                             from solver.day_scheduler import schedule_day
                         except ImportError:
                             from agent.solver.day_scheduler import schedule_day
-                        payload = call['arguments'].get('payload', {})
+                        raw_args = call['arguments']
+                        if isinstance(raw_args, str):
+                            try:
+                                args = json.loads(raw_args) if raw_args else {}
+                            except Exception:
+                                args = {}
+                        else:
+                            args = raw_args or {}
+                        payload = args.get('payload', {}) if isinstance(args, dict) else {}
                         if isinstance(payload, str):
                             try:
                                 payload = json.loads(payload)
