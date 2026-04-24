@@ -48,7 +48,7 @@ def _schedule_day_impl(payload: dict[str, Any]) -> dict[str, Any]:
             "type": "attraction",
             "name": a["name"],
             "start": a["open"],
-            "end": a["open"],
+            "end": a["close"],
         })
     return {
         "status": "FEASIBLE",
