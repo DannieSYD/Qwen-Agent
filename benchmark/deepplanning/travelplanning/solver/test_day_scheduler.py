@@ -84,3 +84,24 @@ def test_two_attractions_ordered_with_transit():
     m_end = _hhmm_to_min(attractions[0]["end"])
     a_start = _hhmm_to_min(attractions[1]["start"])
     assert a_start >= m_end + 20
+
+
+def test_forced_overlap_is_infeasible():
+    """Two attractions whose business hours force an overlap."""
+    payload = _minimal_payload()
+    payload["attractions"] = [
+        {"poi_id": "A1", "name": "POI1", "open": "10:00", "close": "11:30",
+         "stay_min": 60, "stay_max": 60},
+        {"poi_id": "A2", "name": "POI2", "open": "10:00", "close": "11:30",
+         "stay_min": 60, "stay_max": 60},
+    ]
+    payload["transits"] = {
+        "('HOTEL', 'A1')": {"duration_min": 5},
+        "('HOTEL', 'A2')": {"duration_min": 5},
+        "('A1', 'A2')": {"duration_min": 5},
+        "('A2', 'A1')": {"duration_min": 5},
+        "('A1', 'HOTEL')": {"duration_min": 5},
+        "('A2', 'HOTEL')": {"duration_min": 5},
+    }
+    result = schedule_day(payload)
+    assert result["status"] == "INFEASIBLE"

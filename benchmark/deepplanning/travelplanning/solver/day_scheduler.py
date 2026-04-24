@@ -47,6 +47,7 @@ def _schedule_day_impl(payload: dict[str, Any]) -> dict[str, Any]:
         builder.add_activity(a)
 
     builder.add_ordering_and_transit(payload.get("transits", {}))
+    builder.add_no_overlap()
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = DEFAULT_TIME_LIMIT_S
@@ -118,6 +119,11 @@ class _ModelBuilder:
         self.model.Add(end <= a.close_min).OnlyEnforceIf(lit)
         self.model.AddAssumption(lit)
         self._labels.append((lit, f"business_hours({a.name}) in [{_format_hhmm(a.open_min)}, {_format_hhmm(a.close_min)}]"))
+
+    def add_no_overlap(self) -> None:
+        intervals = [self._vars[a.id][3] for a in self._activities]
+        if intervals:
+            self.model.AddNoOverlap(intervals)
 
     def add_ordering_and_transit(self, transits: dict[str, dict]) -> None:
         """For each ordered pair (i, j) of activities, create next_ij boolean.
