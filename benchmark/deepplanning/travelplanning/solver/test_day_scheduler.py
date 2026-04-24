@@ -35,3 +35,25 @@ def test_smoke_feasible_single_attraction():
     assert result["status"] == "FEASIBLE"
     assert isinstance(result["schedule"], list)
     assert any(evt["type"] == "attraction" and evt["name"] == "Park" for evt in result["schedule"])
+
+
+def test_single_attraction_respects_business_hours():
+    payload = _minimal_payload()
+    payload["attractions"][0]["open"] = "09:00"
+    payload["attractions"][0]["close"] = "17:00"
+    payload["attractions"][0]["stay_min"] = 60
+    payload["attractions"][0]["stay_max"] = 60
+
+    result = schedule_day(payload)
+    assert result["status"] == "FEASIBLE"
+    attr_event = next(e for e in result["schedule"] if e["type"] == "attraction")
+    start_min = _hhmm_to_min(attr_event["start"])
+    end_min = _hhmm_to_min(attr_event["end"])
+    assert 9 * 60 <= start_min
+    assert end_min <= 17 * 60
+    assert end_min - start_min == 60
+
+
+def _hhmm_to_min(s: str) -> int:
+    h, m = s.split(":")
+    return int(h) * 60 + int(m)
