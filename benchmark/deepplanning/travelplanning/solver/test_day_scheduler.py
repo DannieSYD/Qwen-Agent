@@ -186,3 +186,23 @@ def test_departure_anchor_forces_infeasibility_when_too_tight():
     # Even starting at open (10:00), end of chain is 10:00 + 120 + 30 + 20 = 13:10 > 12:00
     result = schedule_day(payload)
     assert result["status"] == "INFEASIBLE"
+
+
+def test_infeasible_returns_labeled_unsat_core():
+    payload = _minimal_payload()
+    payload["departure"] = {"time": "12:00", "station_poi": "STN"}
+    payload["end_location"] = "STN"
+    payload["attractions"] = [
+        {"poi_id": "A1", "name": "POI", "open": "10:00", "close": "18:00",
+         "stay_min": 120, "stay_max": 120},
+    ]
+    payload["transits"] = {
+        "('HOTEL', 'A1')": {"duration_min": 10},
+        "('A1', 'STN')": {"duration_min": 30},
+    }
+    result = schedule_day(payload)
+    assert result["status"] == "INFEASIBLE"
+    assert isinstance(result["unsat_core"], list)
+    assert len(result["unsat_core"]) >= 1
+    assert any("departure" in s for s in result["unsat_core"])
+    assert result.get("hint", "") == ""

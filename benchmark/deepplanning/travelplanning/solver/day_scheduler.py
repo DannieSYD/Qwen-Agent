@@ -59,7 +59,11 @@ def _schedule_day_impl(payload: dict[str, Any]) -> dict[str, Any]:
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return builder.extract_feasible(solver)
     if status == cp_model.INFEASIBLE:
-        return {"status": "INFEASIBLE", "unsat_core": [], "hint": ""}
+        return {
+            "status": "INFEASIBLE",
+            "unsat_core": builder.extract_unsat_core(solver),
+            "hint": "",
+        }
     return {"status": "ERROR", "message": f"solver_status={status}", "unsat_core": []}
 
 
@@ -181,6 +185,15 @@ class _ModelBuilder:
             self.model.Add(dinner_start - lunch_end >= MIN_MEAL_GAP_MIN).OnlyEnforceIf(lit)
             self.model.AddAssumption(lit)
             self._labels.append((lit, f"meal_gap >= {MIN_MEAL_GAP_MIN}min"))
+
+    def extract_unsat_core(self, solver: cp_model.CpSolver) -> list[str]:
+        """Map CP-SAT's minimal unsat assumption indices back to labeled strings."""
+        core_indices = set(solver.SufficientAssumptionsForInfeasibility())
+        labels: list[str] = []
+        for lit, label in self._labels:
+            if lit.Index() in core_indices:
+                labels.append(label)
+        return labels
 
     def add_arrival_anchor(self, payload: dict[str, Any]) -> None:
         """Day 1: every activity's start must be >= arrival + exit_buffer + transit(station, i).
