@@ -206,3 +206,34 @@ def test_infeasible_returns_labeled_unsat_core():
     assert len(result["unsat_core"]) >= 1
     assert any("departure" in s for s in result["unsat_core"])
     assert result.get("hint", "") == ""
+
+
+def test_duration_shrinks_to_stay_min_in_tight_day():
+    """Tight day: solver must pick stay_min to fit within the departure anchor."""
+    payload = _minimal_payload()
+    payload["departure"] = {"time": "11:00", "station_poi": "STN"}
+    payload["end_location"] = "STN"
+    payload["attractions"] = [
+        {"poi_id": "A1", "name": "POI", "open": "10:00", "close": "18:00",
+         "stay_min": 30, "stay_max": 120},
+    ]
+    payload["transits"] = {
+        "('HOTEL', 'A1')": {"duration_min": 5},
+        "('A1', 'STN')": {"duration_min": 5},
+    }
+    # From 10:00: stay 30 + transit 5 + entry buffer 20 = 55min -> 10:55 < 11:00
+    result = schedule_day(payload)
+    assert result["status"] == "FEASIBLE"
+    attr = next(e for e in result["schedule"] if e["type"] == "attraction")
+    duration = _hhmm_to_min(attr["end"]) - _hhmm_to_min(attr["start"])
+    assert duration == 30
+
+
+def test_malformed_payload_returns_error():
+    # Attraction entry missing required keys (poi_id, open, ...) raises inside
+    # _collect_activities; the outer try/except in schedule_day converts it to
+    # an ERROR response rather than propagating.
+    result = schedule_day({"attractions": [{"not": "a valid attraction"}]})
+    assert result["status"] == "ERROR"
+    assert "message" in result
+    assert result["unsat_core"] == []
