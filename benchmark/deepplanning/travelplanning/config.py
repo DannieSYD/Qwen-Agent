@@ -16,7 +16,6 @@ class PipelineConfig:
     # Phase 2: Inner Space Solver (OR-Tools CP-SAT)
     enable_solver: bool = False
     solver_time_limit_seconds: float = 30.0
-    solver_fallback_to_assemble_day: bool = True
 
     # Phase 3: TSPTW Route Optimization
     enable_tsptw: bool = False
