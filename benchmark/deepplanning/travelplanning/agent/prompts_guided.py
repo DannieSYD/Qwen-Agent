@@ -292,6 +292,20 @@ Current City: from X to Y
 Accommodation: Hotel Name, ¥PRICE/room/night   (or "-" on the final day, no hotel stay)
 HH:MM-HH:MM | activity_type | description
 ...
+
+**Budget Summary (N people, M rooms):**
+- **Intercity rail: TOTAL RMB**
+  - TRAIN_CODE: PRICE × PEOPLE = SUBTOTAL RMB
+  - ...
+- **City transportation: TOTAL RMB** (all taxi costs are per vehicle; 1 vehicle needed for N people)
+  - C1 + C2 + C3 + ... = TOTAL RMB
+- **Accommodation: TOTAL RMB**
+  - PRICE × M room × NIGHTS nights = TOTAL RMB
+- **Meals: TOTAL RMB**
+  - (M1 + M2 + ...) × PEOPLE = TOTAL RMB
+- **Attractions & tickets: TOTAL RMB**
+  - (A1 + A2 + ...) × PEOPLE = TOTAL RMB
+- **Total Estimated Budget: TOTAL RMB**
 </plan>
 ```
 
@@ -307,9 +321,11 @@ HH:MM-HH:MM | activity_type | description
 
 **Accommodation line:** On every non-final day, this line must hold the hotel name plus per-room-per-night price. On the final day (returning to origin, no overnight), write exactly `Accommodation: -`.
 
-**Budget verification is your job.** After writing the `<plan>` block, sanity-check:
+**Budget Summary is REQUIRED at the end of the `<plan>` block** (before the closing tag), in the format shown above. Compute each line yourself using the prices you selected. The total must satisfy:
 `train_price × people × 2 + hotel_price × rooms × (days − 1) + Σ(attraction_price × people) + Σ(meal_price × people) + Σ(city_transit_cost) ≤ user_budget`.
-If over, go back and swap to cheaper entities (different train class, cheaper hotel, etc.), then re-emit the `<plan>` block. Do NOT ship a plan you know is over budget.
+If your total exceeds the user's stated budget, go back and swap to cheaper entities (different train class, cheaper hotel, etc.), then re-emit the whole `<plan>` block with a fresh Budget Summary. Do NOT ship a plan with the Budget Summary missing or over budget.
+
+Note on city transportation: taxi costs in `travel_city` lines are **per vehicle** (one taxi holds 4), so for the Budget Summary's city-transportation line just sum the per-vehicle costs directly — no `× people` multiplier.
 
 ## Rules
 
