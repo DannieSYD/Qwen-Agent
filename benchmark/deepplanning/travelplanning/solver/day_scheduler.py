@@ -46,6 +46,8 @@ def _schedule_day_impl(payload: dict[str, Any]) -> dict[str, Any]:
     for a in activities:
         builder.add_activity(a)
 
+    builder.add_ordering_and_transit(payload.get("transits", {}))
+
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = DEFAULT_TIME_LIMIT_S
     status = solver.Solve(builder.model)
@@ -117,23 +119,88 @@ class _ModelBuilder:
         self.model.AddAssumption(lit)
         self._labels.append((lit, f"business_hours({a.name}) in [{_format_hhmm(a.open_min)}, {_format_hhmm(a.close_min)}]"))
 
+    def add_ordering_and_transit(self, transits: dict[str, dict]) -> None:
+        """For each ordered pair (i, j) of activities, create next_ij boolean.
+        At most one successor per activity. If next_ij = 1, then
+        end_i + tau_ij + buffer_ij <= start_j. Exactly (n-1) successors in
+        total, which forces all activities into a single chain.
+        """
+        ids = [a.id for a in self._activities]
+        self._next: dict[tuple[str, str], cp_model.IntVar] = {}
+        self._buffer: dict[tuple[str, str], cp_model.IntVar] = {}
+        self._transit_min: dict[tuple[str, str], int] = {}
+
+        for i in ids:
+            for j in ids:
+                if i == j:
+                    continue
+                key = f"('{i}', '{j}')"
+                if key not in transits:
+                    # No transit data = cannot be adjacent in that direction.
+                    continue
+                tau = int(transits[key]["duration_min"])
+                self._transit_min[(i, j)] = tau
+                n_ij = self.model.NewBoolVar(f"next_{i}_{j}")
+                b_ij = self.model.NewIntVar(0, DAY_END_MIN, f"buf_{i}_{j}")
+                self._next[(i, j)] = n_ij
+                self._buffer[(i, j)] = b_ij
+                start_j = self._vars[j][0]
+                end_i = self._vars[i][1]
+                self.model.Add(end_i + tau + b_ij <= start_j).OnlyEnforceIf(n_ij)
+
+        # At most one successor and one predecessor per activity.
+        for i in ids:
+            succs = [self._next[(i, j)] for j in ids if (i, j) in self._next]
+            if succs:
+                self.model.Add(sum(succs) <= 1)
+            preds = [self._next[(j, i)] for j in ids if (j, i) in self._next]
+            if preds:
+                self.model.Add(sum(preds) <= 1)
+
+        # Force all activities into a single chain: exactly n-1 next arcs.
+        n = len(ids)
+        all_next = list(self._next.values())
+        if n >= 2 and all_next:
+            self.model.Add(sum(all_next) == n - 1)
+
     def extract_feasible(self, solver: cp_model.CpSolver) -> dict[str, Any]:
         solved = []
         for a in self._activities:
             start, end, dur, _ = self._vars[a.id]
             solved.append((solver.Value(start), solver.Value(end), a))
         solved.sort()
-        events = []
-        for s_min, e_min, a in solved:
+
+        events: list[dict[str, Any]] = []
+        total_transit = 0
+        total_buffer = 0
+        for idx, (s_min, e_min, a) in enumerate(solved):
             events.append({
                 "type": a.kind,
                 "name": a.name,
                 "start": _format_hhmm(s_min),
                 "end": _format_hhmm(e_min),
             })
+            if idx + 1 < len(solved):
+                next_a = solved[idx + 1][2]
+                pair = (a.id, next_a.id)
+                if pair in getattr(self, "_next", {}) and solver.Value(self._next[pair]) == 1:
+                    tau = self._transit_min[pair]
+                    buf = solver.Value(self._buffer[pair])
+                    transit_start = e_min
+                    transit_end = transit_start + tau
+                    events.append({
+                        "type": "transit",
+                        "from": a.name,
+                        "to": next_a.name,
+                        "start": _format_hhmm(transit_start),
+                        "end": _format_hhmm(transit_end),
+                    })
+                    total_transit += tau
+                    total_buffer += buf
+
         return {
             "status": "FEASIBLE",
             "schedule": events,
-            "total_transit_min": 0,
-            "total_buffer_min": 0,
+            "total_transit_min": total_transit,
+            "total_buffer_min": total_buffer,
         }
