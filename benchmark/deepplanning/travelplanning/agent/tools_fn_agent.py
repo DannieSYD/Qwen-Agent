@@ -910,7 +910,7 @@ class ToolsFnAgent:
                            from Phase 1 constraint extraction. If provided, stored in
                            working memory and rendered in the memory snapshot.
             enable_solver: If True, add run_solver tool
-            solver_version: 'v3' (LLM writes code) or 'v4' (fixed CP-SAT template)
+            solver_version: 'v3' (LLM writes code), 'v4' (fixed CP-SAT template), or 'v5' (intra-day CP-SAT scheduler)
 
         Returns:
             (final_plan, messages, token_usage): Final plan, complete message history, and token usage
@@ -1091,6 +1091,9 @@ class ToolsFnAgent:
                             except Exception:
                                 pass
                         result = schedule_day(payload)
+                        solver_was_called = True
+                        if result.get("status") == "FEASIBLE":
+                            solver_succeeded = True
                         messages.append({
                             "role": "tool",
                             "tool_call_id": call['id'],
@@ -1227,7 +1230,18 @@ class ToolsFnAgent:
             # Guard: if solver is enabled but hasn't produced a valid plan, reject manual plans
             if final_content and enable_solver and not solver_succeeded and solver_nudge_count < 3 and llm_budget > 0:
                 solver_nudge_count += 1
-                if solver_version == 'v4':
+                if solver_version == 'v5':
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "REJECTED: You wrote the plan manually. You MUST call `schedule_day` "
+                            "for each day of the trip before assembling the final plan.\n\n"
+                            "For each day, call `schedule_day(payload)` with the day's entities, "
+                            "transit graph, and day_index. Stitch the per-day results into the "
+                            "final plan yourself. Call `schedule_day` now."
+                        ),
+                    })
+                elif solver_version == 'v4':
                     messages.append({
                         "role": "user",
                         "content": (
