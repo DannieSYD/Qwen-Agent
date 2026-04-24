@@ -1252,7 +1252,7 @@ def run_agent_inference(
     # Load .env early so API keys are available for downstream LLM calls
     _load_dotenv_for_module()
 
-    _GUIDED_VARIANTS = ('guided', 'guided_memory', 'harness_v1', 'harness_v2', 'harness_v3', 'harness_v5')
+    _GUIDED_VARIANTS = ('harness_v1', 'harness_v2', 'harness_v3', 'harness_v5')
 
     if prompt_variant in _GUIDED_VARIANTS:
         try:
@@ -1277,8 +1277,8 @@ def run_agent_inference(
         except ImportError:
             from agent.plan_validator import validate_plan, build_correction_message
 
-    # Enable working memory for guided_memory, harness_v1+
-    enable_memory = (prompt_variant in ('guided_memory', 'harness_v1', 'harness_v2', 'harness_v3', 'harness_v5'))
+    # Enable working memory for harness_v1+
+    enable_memory = (prompt_variant in ('harness_v1', 'harness_v2', 'harness_v3', 'harness_v5'))
     # Enable compact outputs for harness_v1+
     compact_outputs = (prompt_variant in ('harness_v1', 'harness_v2', 'harness_v3', 'harness_v5'))
     # Enable solver tool for harness_v3+
