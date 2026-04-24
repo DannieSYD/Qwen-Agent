@@ -445,10 +445,33 @@ def run_agent_inference(
     print_lock = Lock()
     results = []
     
+    def _build_ablation_query(sample):
+        """ablation-qwc: query_with_constraints bulletizes categorical constraints
+        but drops numeric user specs that live in meta_info (budget, room_number,
+        people_number). Re-inject them so the agent sees the same info the
+        paragraph query carried."""
+        qwc = sample.get('query_with_constraints', '') or sample.get('query', '') or ''
+        mi = sample.get('meta_info') or {}
+        extras = []
+        people = mi.get('people_number')
+        rooms = mi.get('room_number')
+        if people or rooms:
+            parts = []
+            if people: parts.append(f"{people} people")
+            if rooms: parts.append(f"{rooms} rooms")
+            extras.append(f"- Group size: {', '.join(parts)}")
+        budget = (mi.get('hard_constraints') or {}).get('budget_constraint') or {}
+        max_budget = budget.get('max_budget') if isinstance(budget, dict) else None
+        if max_budget:
+            extras.append(f"- Total budget for the trip: within {max_budget} yuan")
+        if not extras:
+            return qwc
+        return qwc.rstrip() + "\n\nAdditional specifications:\n" + "\n".join(extras)
+
     def process_sample(sample):
         sample_id_raw = sample.get('id', 'unknown')
         sample_id = f"id_{sample_id_raw}" if str(sample_id_raw).isdigit() else str(sample_id_raw)
-        query = sample.get('query_with_constraints', '')
+        query = _build_ablation_query(sample)
         
         try:
             with print_lock:
