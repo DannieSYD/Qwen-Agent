@@ -153,6 +153,10 @@ def parse_args():
                        choices=['default', 'explore', 'harness_v1', 'harness_v2', 'harness_v3', 'harness_v5'],
                        help='Prompt variant to use (default: original, explore: explore-first, harness_v1: guided + working memory + compacted tool schema, harness_v2: harness_v1 + constraint extraction, harness_v3: harness_v2 + LLM-generated OR-Tools solver, harness_v5: LLM picks entities + CP-SAT intra-day scheduler)')
 
+    # Ablation flag: force working memory off (also disables auto_route + auto_attraction_details)
+    parser.add_argument('--disable-memory', action='store_true',
+                       help='Force working memory off, even for harness_vN variants (ablation toggle)')
+
     # Advanced options
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose output')
@@ -281,6 +285,7 @@ def run_step_inference(args):
             max_llm_calls=args.max_llm_calls,
             rerun_ids=rerun_ids,  # Pass rerun_ids parameter
             prompt_variant=getattr(args, 'prompt_variant', 'default'),
+            disable_memory=getattr(args, 'disable_memory', False),
         )
         
         elapsed = time.time() - start_time

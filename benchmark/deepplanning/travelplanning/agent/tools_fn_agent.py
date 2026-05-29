@@ -889,13 +889,38 @@ class ToolsFnAgent:
                                 args = {}
                         else:
                             args = raw_args or {}
-                        payload = args.get('payload', {}) if isinstance(args, dict) else {}
-                        if isinstance(payload, str):
-                            try:
-                                payload = json.loads(payload)
-                            except Exception:
-                                pass
-                        result = schedule_day(payload)
+                        # Accept both wrapped {"payload": {...}} and flat {...} arg shapes.
+                        # Function-calling models often flatten when the schema has a single
+                        # top-level object property; treat that as the payload directly.
+                        if isinstance(args, dict):
+                            wrapped = args.get('payload')
+                            if isinstance(wrapped, str):
+                                try:
+                                    wrapped = json.loads(wrapped)
+                                except Exception:
+                                    wrapped = None
+                            payload = wrapped if isinstance(wrapped, dict) else args
+                        else:
+                            payload = {}
+                        # Reject obviously empty payloads up front so the agent gets a clear
+                        # error signal instead of a misleading FEASIBLE with empty schedule.
+                        if (
+                            not payload.get('attractions')
+                            and not payload.get('lunch_restaurant')
+                            and not payload.get('dinner_restaurant')
+                        ):
+                            result = {
+                                "status": "ERROR",
+                                "message": (
+                                    "schedule_day received no activities (attractions/lunch/dinner "
+                                    "all empty). Pass the day's entities at the top level of the "
+                                    "arguments (or wrapped in 'payload'); required keys: day_index, "
+                                    "attractions, lunch_restaurant, dinner_restaurant, transits."
+                                ),
+                                "unsat_core": [],
+                            }
+                        else:
+                            result = schedule_day(payload)
                         solver_was_called = True
                         if result.get("status") == "FEASIBLE":
                             solver_succeeded = True
@@ -1140,13 +1165,38 @@ class ToolsFnAgent:
                                 args = {}
                         else:
                             args = raw_args or {}
-                        payload = args.get('payload', {}) if isinstance(args, dict) else {}
-                        if isinstance(payload, str):
-                            try:
-                                payload = json.loads(payload)
-                            except Exception:
-                                pass
-                        result = schedule_day(payload)
+                        # Accept both wrapped {"payload": {...}} and flat {...} arg shapes.
+                        # Function-calling models often flatten when the schema has a single
+                        # top-level object property; treat that as the payload directly.
+                        if isinstance(args, dict):
+                            wrapped = args.get('payload')
+                            if isinstance(wrapped, str):
+                                try:
+                                    wrapped = json.loads(wrapped)
+                                except Exception:
+                                    wrapped = None
+                            payload = wrapped if isinstance(wrapped, dict) else args
+                        else:
+                            payload = {}
+                        # Reject obviously empty payloads up front so the agent gets a clear
+                        # error signal instead of a misleading FEASIBLE with empty schedule.
+                        if (
+                            not payload.get('attractions')
+                            and not payload.get('lunch_restaurant')
+                            and not payload.get('dinner_restaurant')
+                        ):
+                            result = {
+                                "status": "ERROR",
+                                "message": (
+                                    "schedule_day received no activities (attractions/lunch/dinner "
+                                    "all empty). Pass the day's entities at the top level of the "
+                                    "arguments (or wrapped in 'payload'); required keys: day_index, "
+                                    "attractions, lunch_restaurant, dinner_restaurant, transits."
+                                ),
+                                "unsat_core": [],
+                            }
+                        else:
+                            result = schedule_day(payload)
                         messages.append({
                             "role": "tool",
                             "tool_call_id": call['id'],
@@ -1223,6 +1273,7 @@ def run_agent_inference(
     max_llm_calls: int = 100,
     rerun_ids: Optional[List[int]] = None,
     prompt_variant: str = 'default',
+    disable_memory: bool = False,
 ) -> Dict[str, Any]:
     """
     Run agent inference (batch processing)
@@ -1303,8 +1354,10 @@ def run_agent_inference(
         except ImportError:
             from agent.plan_validator import validate_plan, build_correction_message
 
-    # Enable working memory for harness_v1+
-    enable_memory = (prompt_variant in ('harness_v1', 'harness_v2', 'harness_v3', 'harness_v5'))
+    # Enable working memory for harness_v1+ (overridable via --disable-memory ablation flag)
+    enable_memory = (prompt_variant in ('harness_v1', 'harness_v2', 'harness_v3', 'harness_v5')) and not disable_memory
+    if disable_memory:
+        print(f"  ⚠️  --disable-memory: working memory + auto_route + auto_attraction_details forced OFF")
     # Enable compact outputs for harness_v1+
     compact_outputs = (prompt_variant in ('harness_v1', 'harness_v2', 'harness_v3', 'harness_v5'))
     # Enable solver tool for harness_v3+
