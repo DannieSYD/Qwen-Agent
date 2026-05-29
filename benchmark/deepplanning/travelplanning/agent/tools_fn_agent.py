@@ -993,17 +993,17 @@ class ToolsFnAgent:
                         # --- Auto-query attraction details after recommend_attractions ---
                         auto_detail_lines = self._auto_query_attraction_details(call['name'], memory)
 
-                        # --- Auto-attach route info (Option C) ---
-                        # After restaurants or attraction details, auto-query routes
-                        # between known locations so the model gets travel times for free
-                        auto_route_lines = self._auto_query_routes(call['name'], call['arguments'], memory)
+                        # --- Auto-route querying DISABLED (decoupled from working memory) ---
+                        # _auto_query_routes is intentionally NOT called. The model must
+                        # query transit pairs itself (per the harness_v5 prompt's
+                        # get_distance_matrix instruction). This isolates working memory
+                        # from the auto_route helper for the ablation comparison.
+                        # auto_attraction_details is kept ON.
 
-                        # Replace raw output with: acknowledgment + auto-details + auto-routes + full memory snapshot
+                        # Replace raw output with: acknowledgment + auto-details + full memory snapshot
                         tool_content = processed
                         if auto_detail_lines:
                             tool_content += "\n\n" + auto_detail_lines
-                        if auto_route_lines:
-                            tool_content += "\n\n" + auto_route_lines
                         tool_content += "\n\n" + memory.render_snapshot()
                     else:
                         tool_content = tool_result
