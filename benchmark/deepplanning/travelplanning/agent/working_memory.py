@@ -671,34 +671,6 @@ class WorkingMemory:
 
         return '\n'.join(corrected_lines)
 
-    def _render_routes_matrix(self) -> str:
-        """Render routes as a compact distance matrix grouped by origin."""
-        # Build lookup: (origin_name, dest_name) -> route info
-        from collections import OrderedDict
-        by_origin = OrderedDict()  # origin -> [(dest, duration, dist_km, cost)]
-        for r in self.routes:
-            origin = r['origin_name'] or r['origin_coords']
-            dest = r['dest_name'] or r['dest_coords']
-            dur = r['duration_min']
-            dist = f"{int(r['distance_m'])/1000:.1f}" if isinstance(r['distance_m'], (int, float)) else '?'
-            cost = r['cost']
-            by_origin.setdefault(origin, []).append((dest, dur, dist, cost))
-
-        lines = ["ROUTES (from → to: duration, distance, cost):"]
-        for origin, dests in by_origin.items():
-            entries = [f"{d[0]} {d[1]}min/{d[2]}km/¥{d[3]}" for d in dests]
-            lines.append(f"  From {origin}:")
-            # Wrap entries ~2 per line to keep it readable
-            row = []
-            for e in entries:
-                row.append(e)
-                if len(row) == 2:
-                    lines.append(f"    {' | '.join(row)}")
-                    row = []
-            if row:
-                lines.append(f"    {' | '.join(row)}")
-        return "\n".join(lines)
-
     def render_snapshot(self) -> str:
         """
         Render the current memory state as a compact, readable string.
@@ -776,9 +748,12 @@ class WorkingMemory:
                 lines.append(f"  {name}: ({coords['lat']}, {coords['lon']})")
             sections.append("\n".join(lines))
 
-        # Routes — render as compact distance matrix
-        if self.routes:
-            sections.append(self._render_routes_matrix())
+        # Routes — intentionally NOT rendered to the LLM context.
+        # They are O(n^2), append-only, and low-reuse for the LLM, which does
+        # not perform routing/ordering itself. self.routes is still accumulated
+        # and consumed by the solver via data_export (data["routes"]) and by
+        # autocorrect_travel_city. Keeping them out of the per-turn snapshot
+        # removes the dominant low-value chunk of re-broadcast context.
 
         # Constraints (Phase 1) — show at top if available
         if self._constraints_rendered:
