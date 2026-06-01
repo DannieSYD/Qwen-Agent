@@ -81,5 +81,6 @@ qwen-agent-docs/website/*.tsbuildinfo
 *.html
 
 benchmark/deepplanning/reference_visualization/
+benchmark/deepplanning/dp_result/
 
 results_*/

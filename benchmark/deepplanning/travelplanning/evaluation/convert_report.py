@@ -250,8 +250,9 @@ def convert_reports(
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Always use qwen-plus for conversion
-    conversion_model = 'gpt-5.4'
+    # Conversion model (report -> structured JSON), independent of the benchmarked model
+    conversion_model = 'gpt-5.2-2025-12-11'
+    # conversion_model = 'gpt-5.4'
     # conversion_model = 'qwen-plus'
     
     # Load model config and create client
